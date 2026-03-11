@@ -16,12 +16,14 @@ You have two custom tools from the autoresearch extension. **Always use these in
 
   **On the first call**, always set these to configure the display:
   - `metric_name` — display name for primary metric (e.g. `"total_µs"`, `"bundle_kb"`, `"val_bpb"`)
-  - `metric_unit` — unit string that controls formatting: `"µs"`, `"ms"`, `"s"`, `"kb"`, or `""` for unitless
+  - `metric_unit` — unit string that controls number formatting: `"µs"`, `"ms"`, `"s"`, `"kb"`, or `""` for unitless. Integers get comma-separated thousands; fractional values get 2 decimal places.
   - `direction` — `"lower"` (default) or `"higher"` depending on what's better
 
   **Optional params (any call):**
   - `metrics` — dict of secondary metric name→value for tradeoff monitoring, e.g. `{"parse_µs": 5505, "render_µs": 1440}`
-  - `new_baseline` — boolean (default false), marks this row as the reference baseline
+  - `new_baseline` — only use this to **reset** the comparison reference point (e.g. after changing the optimization target or accepting a tradeoff). The first experiment is automatically the baseline. Do NOT set this on every keep.
+
+  The inline widget shows the current metric vs baseline as a delta %, e.g. `★ total_µs: 6,945 (-21.2%)`.
 
 ## Step 1: Gather Context
 
@@ -39,7 +41,7 @@ If the user already provided these in their prompt, skip asking and confirm your
 
 1. **Create a branch**: `git checkout -b autoresearch/<tag>` (propose a tag based on the goal + date).
 2. **Read the relevant files** to understand what you're working with.
-3. **Run the baseline**: use `run_experiment` with the command as-is, then `log_experiment` to record it with `new_baseline: true`. Include any secondary `metrics` you want to track for tradeoffs.
+3. **Run the baseline**: use `run_experiment` with the command as-is, then `log_experiment` to record it. The first experiment automatically becomes the baseline. Set `metric_name`, `metric_unit`, and `direction` on this first call. Include any secondary `metrics` you want to track for tradeoffs.
 4. **Start looping** — do NOT wait for confirmation after the baseline. Go.
 
 ## Step 3: Experiment Loop
@@ -54,7 +56,7 @@ LOOP FOREVER:
 3. `GIT_EDITOR=true git add -A && git commit -m "short description"`
 4. Use `run_experiment` with the command
 5. Use `log_experiment` to record the result. Always pass secondary `metrics` if tracking tradeoffs.
-6. If metric improved AND constraints met → keep (status: `keep`). If this is a significant milestone, set `new_baseline: true` to reset the comparison reference.
+6. If metric improved AND constraints met → keep (status: `keep`).
 7. If metric worse OR constraints broken → `git reset --hard HEAD~1` (status: `discard` or `crash`)
 8. Repeat
 

@@ -494,15 +494,34 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       ctx.ui.setWidget("autoresearch", (_tui, theme) => {
         const kept = state.results.filter((r) => r.status === "keep").length;
         const crashed = state.results.filter((r) => r.status === "crash").length;
-        const best = formatNum(state.bestMetric, state.metricUnit);
+        const baseline = state.bestMetric;
+
+        // Find most recent kept experiment's primary metric
+        let latest: number | null = null;
+        for (let i = state.results.length - 1; i >= 0; i--) {
+          if (state.results[i].status === "keep" && state.results[i].metric > 0) {
+            latest = state.results[i].metric;
+            break;
+          }
+        }
+
+        const displayVal = latest ?? baseline;
         const parts = [
           theme.fg("accent", "🔬 autoresearch"),
           theme.fg("muted", ` ${state.totalExperiments} runs`),
           theme.fg("success", ` ${kept} kept`),
           crashed > 0 ? theme.fg("error", ` ${crashed} crashed`) : "",
           theme.fg("dim", " │ "),
-          theme.fg("warning", theme.bold(`★ ${state.metricName}: ${best}`)),
+          theme.fg("warning", theme.bold(`★ ${state.metricName}: ${formatNum(displayVal, state.metricUnit)}`)),
         ];
+
+        // Show delta % vs baseline
+        if (baseline !== null && latest !== null && baseline !== 0 && latest !== baseline) {
+          const pct = ((latest - baseline) / baseline) * 100;
+          const sign = pct > 0 ? "+" : "";
+          const deltaColor = isBetter(latest, baseline, state.bestDirection) ? "success" : "error";
+          parts.push(theme.fg(deltaColor, ` (${sign}${pct.toFixed(1)}%)`));
+        }
 
         // Show secondary metric baselines
         if (state.secondaryMetrics.length > 0) {
@@ -694,7 +713,9 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const secondaryMetrics = params.metrics ?? {};
-      const isBaseline = params.new_baseline ?? false;
+      // First experiment is always a baseline; explicit new_baseline resets it
+      const isFirstExperiment = state.totalExperiments === 0;
+      const isBaseline = isFirstExperiment || (params.new_baseline ?? false);
 
       // Apply metric config (typically set on first call, sticky after that)
       if (params.metric_name) state.metricName = params.metric_name;
