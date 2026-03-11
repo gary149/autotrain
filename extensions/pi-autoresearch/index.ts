@@ -19,7 +19,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { truncateTail } from "@mariozechner/pi-coding-agent";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { Text, truncateToWidth } from "@mariozechner/pi-tui";
+import { Text, truncateToWidth, matchesKey, visibleWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -221,7 +221,8 @@ function findBaselineSecondary(
 function renderDashboardLines(
   st: ExperimentState,
   width: number,
-  th: Theme
+  th: Theme,
+  maxRows: number = 6
 ): string[] {
   const lines: string[] = [];
 
@@ -313,20 +314,11 @@ function renderDashboardLines(
     }
   }
 
-  if (st.name) {
-    lines.push(
-      truncateToWidth(
-        `  ${th.fg("accent", st.name)}`,
-        width
-      )
-    );
-  }
-
   lines.push("");
 
   // Determine visible rows for column pruning
-  const maxRows = 6;
-  const startIdx = Math.max(0, st.results.length - maxRows);
+  const effectiveMax = maxRows <= 0 ? st.results.length : maxRows;
+  const startIdx = Math.max(0, st.results.length - effectiveMax);
   const visibleRows = st.results.slice(startIdx);
 
   // Only show secondary metric columns that have at least one value in visible rows
@@ -577,13 +569,20 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         const width = process.stdout.columns || 120;
         const lines: string[] = [];
 
-        const hintText = " ctrl+x to collapse ";
-        const headerLabel = " 🔬 autoresearch ";
-        const fillLen = Math.max(0, width - 3 - headerLabel.length - hintText.length - 1);
+        const hintText = " ctrl+x collapse • ctrl+shift+x fullscreen ";
+        const labelPrefix = "🔬 autoresearch";
+        const nameStr = state.name ? `: ${state.name}` : "";
+        // 3 leading dashes + space + label + space + fill + hint
+        const maxLabelLen = width - 3 - 2 - hintText.length - 1;
+        let label = labelPrefix + nameStr;
+        if (label.length > maxLabelLen) {
+          label = label.slice(0, maxLabelLen - 1) + "…";
+        }
+        const fillLen = Math.max(0, width - 3 - 1 - label.length - 1 - hintText.length);
         lines.push(
           truncateToWidth(
-            theme.fg("borderMuted", "─".repeat(3)) +
-              theme.fg("accent", headerLabel) +
+            theme.fg("borderMuted", "───") +
+              theme.fg("accent", " " + label + " ") +
               theme.fg("borderMuted", "─".repeat(fillLen)) +
               theme.fg("dim", hintText),
             width
@@ -659,7 +658,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           parts.push(theme.fg("dim", ` │ ${state.name}`));
         }
 
-        parts.push(theme.fg("dim", "  (ctrl+x to expand)"));
+        parts.push(theme.fg("dim", "  (ctrl+x expand • ctrl+shift+x fullscreen)"));
 
         return new Text(parts.join(""), 0, 0);
       });
@@ -1134,6 +1133,131 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       }
       dashboardExpanded = !dashboardExpanded;
       updateWidget(ctx);
+    },
+  });
+
+  // -----------------------------------------------------------------------
+  // Ctrl+Shift+X — fullscreen scrollable dashboard overlay
+  // -----------------------------------------------------------------------
+
+  pi.registerShortcut("ctrl+shift+x", {
+    description: "Fullscreen autoresearch dashboard",
+    handler: async (ctx) => {
+      if (state.results.length === 0) {
+        ctx.ui.notify("No experiments yet", "info");
+        return;
+      }
+
+      await ctx.ui.custom<void>(
+        (tui, theme, _kb, done) => {
+          let scrollOffset = 0;
+          let cachedLines: string[] | null = null;
+
+          function getContentLines(): string[] {
+            if (!cachedLines) {
+              const w = (process.stdout.columns || 120) - 4; // inner width (border padding)
+              cachedLines = renderDashboardLines(state, w, theme, 0);
+            }
+            return cachedLines;
+          }
+
+          return {
+            render(width: number): string[] {
+              const height = (process.stdout.rows || 40) - 2; // leave room for border
+              const innerW = width - 4; // │ + space + content + space + │
+              const content = getContentLines();
+              const totalRows = content.length;
+              const viewportRows = height - 4; // top border + title + bottom border + help
+
+              // Clamp scroll
+              const maxScroll = Math.max(0, totalRows - viewportRows);
+              if (scrollOffset > maxScroll) scrollOffset = maxScroll;
+              if (scrollOffset < 0) scrollOffset = 0;
+
+              const out: string[] = [];
+
+              // Top border with title
+              const titlePrefix = "🔬 autoresearch";
+              const nameStr = state.name ? `: ${state.name}` : "";
+              const maxTitleLen = innerW - 4;
+              let title = titlePrefix + nameStr;
+              if (title.length > maxTitleLen) {
+                title = title.slice(0, maxTitleLen - 1) + "…";
+              }
+              const topFill = Math.max(0, innerW + 2 - 1 - title.length - 1);
+              out.push(
+                theme.fg("border", "╭") +
+                theme.fg("accent", " " + title + " ") +
+                theme.fg("border", "─".repeat(topFill) + "╮")
+              );
+
+              // Scrollbar indicator
+              const scrollInfo = totalRows > viewportRows
+                ? ` ${scrollOffset + 1}-${Math.min(scrollOffset + viewportRows, totalRows)}/${totalRows}`
+                : "";
+
+              // Content rows
+              const pad = (s: string, len: number) => {
+                const vis = visibleWidth(s);
+                return s + " ".repeat(Math.max(0, len - vis));
+              };
+              const row = (s: string) =>
+                theme.fg("border", "│") + " " + pad(s, innerW) + " " + theme.fg("border", "│");
+
+              const visible = content.slice(scrollOffset, scrollOffset + viewportRows);
+              for (const line of visible) {
+                out.push(row(line));
+              }
+              // Fill remaining viewport with empty rows
+              for (let i = visible.length; i < viewportRows; i++) {
+                out.push(row(""));
+              }
+
+              // Bottom border with help
+              const helpText = ` ↑↓/j/k scroll • esc close${scrollInfo} `;
+              const botFill = Math.max(0, innerW + 2 - helpText.length);
+              out.push(
+                theme.fg("border", "╰" + "─".repeat(botFill)) +
+                theme.fg("dim", helpText) +
+                theme.fg("border", "╯")
+              );
+
+              return out;
+            },
+
+            handleInput(data: string): void {
+              const content = getContentLines();
+              const height = (process.stdout.rows || 40) - 2;
+              const viewportRows = height - 4;
+              const maxScroll = Math.max(0, content.length - viewportRows);
+
+              if (matchesKey(data, "escape") || data === "q") {
+                done(undefined);
+                return;
+              }
+              if (matchesKey(data, "up") || data === "k") {
+                scrollOffset = Math.max(0, scrollOffset - 1);
+              } else if (matchesKey(data, "down") || data === "j") {
+                scrollOffset = Math.min(maxScroll, scrollOffset + 1);
+              } else if (matchesKey(data, "pageup") || data === "u") {
+                scrollOffset = Math.max(0, scrollOffset - viewportRows);
+              } else if (matchesKey(data, "pagedown") || data === "d") {
+                scrollOffset = Math.min(maxScroll, scrollOffset + viewportRows);
+              } else if (data === "g") {
+                scrollOffset = 0;
+              } else if (data === "G") {
+                scrollOffset = maxScroll;
+              }
+              tui.requestRender();
+            },
+
+            invalidate(): void {
+              cachedLines = null;
+            },
+          };
+        },
+        { overlay: true }
+      );
     },
   });
 
