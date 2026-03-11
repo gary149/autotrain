@@ -12,7 +12,7 @@ Set up an autonomous experiment loop and start running immediately.
 You have two custom tools from the autoresearch extension. **Always use these instead of raw bash for experiments:**
 
 - **`run_experiment`** — pass it a `command` to run. It times execution, captures output, detects pass/fail via exit code.
-- **`log_experiment`** — records each experiment's `commit`, `metric`, `status` (keep/discard/crash), and `description`. Persists state, updates the status widget and `/autoresearch` dashboard.
+- **`log_experiment`** — records each experiment's `commit`, `metric`, `status` (keep/discard/crash), and `description`. Supports optional `metrics` (dict of secondary metric name→value) for tradeoff monitoring and `new_baseline` (boolean, default false) to mark the row as the reference baseline. Persists state, updates the status widget and `/autoresearch` dashboard.
 
 ## Step 1: Gather Context
 
@@ -30,7 +30,7 @@ If the user already provided these in their prompt, skip asking and confirm your
 
 1. **Create a branch**: `git checkout -b autoresearch/<tag>` (propose a tag based on the goal + date).
 2. **Read the relevant files** to understand what you're working with.
-3. **Run the baseline**: use `run_experiment` with the command as-is, then `log_experiment` to record it.
+3. **Run the baseline**: use `run_experiment` with the command as-is, then `log_experiment` to record it with `new_baseline: true`. Include any secondary `metrics` you want to track for tradeoffs.
 4. **Start looping** — do NOT wait for confirmation after the baseline. Go.
 
 ## Step 3: Experiment Loop
@@ -44,8 +44,8 @@ LOOP FOREVER:
 2. Edit files with the idea
 3. `GIT_EDITOR=true git add -A && git commit -m "short description"`
 4. Use `run_experiment` with the command
-5. Use `log_experiment` to record the result
-6. If metric improved AND constraints met → keep (status: `keep`)
+5. Use `log_experiment` to record the result. Always pass secondary `metrics` if tracking tradeoffs.
+6. If metric improved AND constraints met → keep (status: `keep`). If this is a significant milestone, set `new_baseline: true` to reset the comparison reference.
 7. If metric worse OR constraints broken → `git reset --hard HEAD~1` (status: `discard` or `crash`)
 8. Repeat
 
