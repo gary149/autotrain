@@ -73,17 +73,10 @@ Bash script (`set -euo pipefail`) that: pre-checks fast (syntax errors in <1s), 
 
 ## Ideas Backlog
 
-When you discover complex but promising optimizations that you decide not to pursue right now, **append them as bullet points to `autoresearch.ideas.md`**. Don't let good ideas get lost.
+When you discover complex but promising optimizations that you won't pursue right now, **append them as bullets to `autoresearch.ideas.md`**. Don't let good ideas get lost.
 
-If the loop stops (context limit, crash, etc.) and `autoresearch.ideas.md` exists, you'll be asked to:
-1. Read the ideas file and use it as inspiration for new experiment paths
-2. Prune ideas that are duplicated, already tried, or clearly bad
-3. Create experiments based on the remaining ideas
-4. If nothing is left, try to come up with your own new ideas
-5. If all paths are exhausted, delete `autoresearch.ideas.md` and write a final summary report
+On resume (context limit, crash), check `autoresearch.ideas.md` — prune stale/tried entries, experiment with the rest. When all paths are exhausted, delete the file and write a final summary.
 
-When there is no `autoresearch.ideas.md` file and the loop ends, the research is complete.
+## User Messages During Experiments
 
-## User Steers
-
-User messages sent while an experiment is running are **automatically queued** and delivered to you after your next `log_experiment` call. Finish your current experiment first — don't stop or ask for confirmation. Incorporate the user's idea in the next experiment.
+If the user sends a message while an experiment is running, finish the current `run_experiment` + `log_experiment` cycle first, then incorporate their feedback in the next iteration. Don't abandon a running experiment.

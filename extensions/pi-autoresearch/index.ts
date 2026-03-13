@@ -407,7 +407,7 @@ function renderDashboardLines(
 
     // Primary metric with color coding
     const primaryStr = formatNum(r.metric, st.metricUnit);
-    let primaryColor: string = isOld ? "dim" : "text";
+    let primaryColor: Parameters<typeof th.fg>[0] = isOld ? "dim" : "text";
     if (!isOld) {
       if (isBaseline) {
         primaryColor = "muted"; // baseline row
@@ -438,7 +438,7 @@ function renderDashboardLines(
       const val = rowMetrics[sm.name];
       if (val !== undefined) {
         const secStr = formatNum(val, sm.unit);
-        let secColor: string = "dim";
+        let secColor: Parameters<typeof th.fg>[0] = "dim";
         if (!isOld) {
           const bv = baselineSecondary[sm.name];
           if (isBaseline) {
@@ -471,9 +471,6 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
   let dashboardExpanded = false;
   let autoresearchMode = false;
   let lastCtx: ExtensionContext | null = null;
-
-  // Message queue: user steers are held until the next log_experiment call
-  let messageQueue: string[] = [];
 
   // Running experiment state (for spinner in fullscreen overlay)
   let runningExperiment: { startedAt: number; command: string } | null = null;
@@ -720,33 +717,17 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
     if (!autoresearchMode) return;
 
+    // Auto-continue: send a message to resume the loop
+    // The agent reads autoresearch.md on startup which has all context
     const ideasPath = path.join(ctx.cwd, "autoresearch.ideas.md");
-    if (fs.existsSync(ideasPath)) {
-      // Ideas file exists — send continuation message to pick up where we left off
-      pi.sendUserMessage(
-        "The optimization loop stopped. Read autoresearch.ideas.md — use the ideas as inspiration for new experiment paths. " +
-        "Prune any ideas that are duplicated, already tried, or clearly bad. Then create experiments based on what remains. " +
-        "If nothing useful is left, see if you can come up with your own ideas. " +
-        "If you've exhausted all paths, delete autoresearch.ideas.md and write a final report."
-      );
+    const hasIdeas = fs.existsSync(ideasPath);
+
+    let resumeMsg = "Autoresearch loop ended (likely context limit). Resume the experiment loop — read autoresearch.md and git log for context.";
+    if (hasIdeas) {
+      resumeMsg += " Check autoresearch.ideas.md for promising paths to explore. Prune stale/tried ideas.";
     }
-  });
 
-  // Queue user messages during active autoresearch runs — flush after log_experiment
-  pi.on("input", async (event, ctx) => {
-    if (!autoresearchMode) return { action: "continue" as const };
-    if (ctx.isIdle()) return { action: "continue" as const };
-    // Only queue interactive user messages, not extension-injected ones
-    if (event.source !== "interactive") return { action: "continue" as const };
-    // Don't queue commands (/, !, !!)
-    if (typeof event.text === "string" && /^[\/!]/.test(event.text.trim())) return { action: "continue" as const };
-
-    const text = typeof event.text === "string" ? event.text : "";
-    if (!text.trim()) return { action: "continue" as const };
-
-    messageQueue.push(text);
-    ctx.ui.notify(`Queued steer (will apply after next log_experiment): "${text.slice(0, 60)}${text.length > 60 ? "…" : ""}"`, "info");
-    return { action: "handled" as const };
+    pi.sendUserMessage(resumeMsg);
   });
 
   // When in autoresearch mode, add a static note to the system prompt.
@@ -756,21 +737,18 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
     const mdPath = path.join(ctx.cwd, "autoresearch.md");
     const ideasPath = path.join(ctx.cwd, "autoresearch.ideas.md");
+    const hasIdeas = fs.existsSync(ideasPath);
 
     let extra =
       "\n\n## Autoresearch Mode (ACTIVE)" +
       "\nYou are in autoresearch mode. Optimize the primary metric through an autonomous experiment loop." +
       "\nUse init_experiment, run_experiment, and log_experiment tools. NEVER STOP until interrupted." +
       `\nExperiment rules: ${mdPath} — read this file at the start of every session and after compaction.` +
-      "\n\n### Ideas Backlog" +
-      `\nIf you discover complex but promising optimizations you decide not to pursue yet, append them as bullet points to ${ideasPath}.` +
-      "\nThis serves as a backlog of future experiment paths. Don't let good ideas get lost — write them down." +
-      "\n\n### User Steers" +
-      "\nUser messages during experiments are ideas to try. They are automatically queued and delivered after your next log_experiment call." +
-      "\nDo NOT stop or ask for confirmation — finish your current experiment, log it, and then incorporate the user's idea in the next experiment.";
+      "\nWrite promising but deferred optimizations as bullet points to autoresearch.ideas.md — don't let good ideas get lost." +
+      "\nIf the user sends a follow-on message while an experiment is running, finish the current run_experiment + log_experiment cycle first, then address their message in the next iteration.";
 
-    if (messageQueue.length > 0) {
-      extra += `\n\n(${messageQueue.length} user steer${messageQueue.length > 1 ? "s" : ""} queued — will be delivered after next log_experiment.)`;
+    if (hasIdeas) {
+      extra += `\n\n💡 Ideas backlog exists at ${ideasPath} — check it for promising experiment paths. Prune stale entries.`;
     }
 
     return {
@@ -1174,16 +1152,6 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       // Refresh fullscreen overlay if open
       if (overlayTui) overlayTui.requestRender();
 
-      // Flush queued user steers — deliver as a single steer message
-      if (messageQueue.length > 0) {
-        const queued = messageQueue.splice(0);
-        const steerText = queued.length === 1
-          ? `User steer (queued): ${queued[0]}`
-          : `User steers (queued):\n${queued.map((m) => `- ${m}`).join("\n")}`;
-        text += `\n\n📬 ${queued.length} queued steer${queued.length > 1 ? "s" : ""} from user — see next message.`;
-        pi.sendUserMessage(steerText, { deliverAs: "followUp" });
-      }
-
       return {
         content: [{ type: "text", text }],
         details: { experiment, state: { ...state } } as LogDetails,
@@ -1388,9 +1356,9 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
                 scrollOffset = Math.max(0, scrollOffset - 1);
               } else if (matchesKey(data, "down") || data === "j") {
                 scrollOffset = Math.min(maxScroll, scrollOffset + 1);
-              } else if (matchesKey(data, "pageup") || data === "u") {
+              } else if (matchesKey(data, "pageUp") || data === "u") {
                 scrollOffset = Math.max(0, scrollOffset - viewportRows);
-              } else if (matchesKey(data, "pagedown") || data === "d") {
+              } else if (matchesKey(data, "pageDown") || data === "d") {
                 scrollOffset = Math.min(maxScroll, scrollOffset + viewportRows);
               } else if (data === "g") {
                 scrollOffset = 0;
@@ -1442,7 +1410,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       const hasRules = fs.existsSync(mdPath);
 
       if (hasRules) {
-        ctx.ui.notify("Autoresearch mode ON — rules loaded from autoresearch.md", "success");
+        ctx.ui.notify("Autoresearch mode ON — rules loaded from autoresearch.md", "info");
         if (args) {
           // User gave specific instructions, pass them along
           pi.sendUserMessage(`Autoresearch mode active. ${args}`);
