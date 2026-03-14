@@ -20,7 +20,7 @@ Follow these steps **in order**. Do not skip steps.
 ### Step 1: Gather Requirements & Recon
 
 Ask (or infer from context):
-- **Goal** — what capability are we training? (e.g., "chess move prediction", "code completion")
+- **Goal** — what capability are we training? (e.g., "code completion", "medical QA", "sentiment classification")
 - **Base model** — name, size, quantization (e.g., `Qwen/Qwen2.5-3B`)
 - **Dataset** — source, format, size, any filtering criteria
 - **Metric** — primary metric + direction (e.g., `exact_accuracy` higher is better)
@@ -44,8 +44,8 @@ hf models ls --author meta-llama --sort downloads --format json
 # If dataset is on the Hub, inspect it
 hf datasets info <dataset_id>
 
-# Search for datasets if user doesn't have one yet
-hf datasets ls --search "chess" --sort downloads --limit 10
+# Search for datasets if user doesn't have one yet (replace with your topic)
+hf datasets ls --search "code" --sort downloads --limit 10
 hf datasets ls --search "code instructions" --filter task_categories:text-generation
 
 # Explore dataset structure and size with SQL (DuckDB)
@@ -55,11 +55,11 @@ hf datasets sql "SELECT COUNT(*) AS rows FROM read_parquet('<parquet_url>')"
 # Sample rows to understand format
 hf datasets sql "SELECT * FROM read_parquet('<parquet_url>') LIMIT 5" --format json
 
-# Check distributions (e.g., rating ranges, text lengths) for curation decisions
-hf datasets sql "SELECT rating_bucket, COUNT(*) AS n FROM (
-  SELECT FLOOR(rating / 200) * 200 AS rating_bucket
+# Check distributions for curation decisions (adapt column names to your dataset)
+hf datasets sql "SELECT bucket, COUNT(*) AS n FROM (
+  SELECT FLOOR(score * 10) / 10 AS bucket
   FROM read_parquet('<parquet_url>')
-) GROUP BY rating_bucket ORDER BY rating_bucket"
+) GROUP BY bucket ORDER BY bucket"
 ```
 
 This recon informs data curation decisions in Phase 1 — do it **before** writing any code.
@@ -371,9 +371,9 @@ python -m compileall -q src/ || { echo "Syntax error"; exit 1; }
 # <evaluation command here>
 
 # Output metrics — one METRIC line per metric
-# METRIC exact_accuracy=0.1864
-# METRIC legal_move_rate=0.983
+# METRIC accuracy=0.847
 # METRIC val_loss=1.234
+# METRIC f1=0.812
 ```
 
 **Timeout guidance:** Set `timeout_seconds` in `run_experiment` to `training_time * 1.5`. If a typical run takes 5 minutes, set timeout to 450 seconds.
@@ -431,7 +431,7 @@ WHERE quality_score > 0.8 LIMIT 5" --format json
 How you format the input/output matters enormously:
 - **Instruction template**: System prompt, few-shot examples
 - **Chat template**: Match the base model's expected format exactly
-- **Target format**: SAN vs UCI, JSON vs plain text, etc.
+- **Target format**: JSON vs plain text, structured vs free-form, etc.
 - **Target length**: Shorter outputs are easier to learn (if they retain information)
 - **Special tokens**: Proper use of BOS/EOS/pad tokens
 
@@ -621,7 +621,7 @@ The `hf` command (not deprecated `huggingface-cli`) is available. Key commands f
 | `hf models ls --search "qwen" --sort downloads` | Search for candidate base models |
 | `hf models ls --author ORG --filter TAG` | Filter models by org and task tag |
 | `hf datasets info DATASET_ID` | Inspect dataset (size, schema, splits) |
-| `hf datasets ls --search "chess" --sort downloads` | Search for training datasets |
+| `hf datasets ls --search "your topic" --sort downloads` | Search for training datasets |
 | `hf datasets parquet DATASET_ID` | Get parquet URLs for SQL queries |
 | `hf datasets sql "SQL"` | Query datasets with DuckDB (explore, filter, profile) |
 | `hf download REPO_ID --local-dir ./path` | Download model or dataset |

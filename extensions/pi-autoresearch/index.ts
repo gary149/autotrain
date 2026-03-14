@@ -19,7 +19,12 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { truncateTail } from "@mariozechner/pi-coding-agent";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { Text, truncateToWidth, matchesKey, visibleWidth } from "@mariozechner/pi-tui";
+import {
+  Text,
+  truncateToWidth,
+  matchesKey,
+  visibleWidth,
+} from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -91,13 +96,13 @@ const RunParams = Type.Object({
   timeout_seconds: Type.Optional(
     Type.Number({
       description: "Kill after this many seconds (default: 600)",
-    })
+    }),
   ),
   checks_timeout_seconds: Type.Optional(
     Type.Number({
       description:
         "Kill autoresearch.checks.sh after this many seconds (default: 300). Only relevant when the checks file exists.",
-    })
+    }),
   ),
 });
 
@@ -114,13 +119,13 @@ const InitParams = Type.Object({
     Type.String({
       description:
         'Unit for the primary metric. Use "µs", "ms", "s", "kb", "mb", or "" for unitless. Affects number formatting. Default: ""',
-    })
+    }),
   ),
   direction: Type.Optional(
     Type.String({
       description:
         'Whether "lower" or "higher" is better for the primary metric. Default: "lower".',
-    })
+    }),
   ),
 });
 
@@ -138,13 +143,13 @@ const LogParams = Type.Object({
     Type.Record(Type.String(), Type.Number(), {
       description:
         'Additional metrics to track as { name: value } pairs, e.g. { "compile_µs": 4200, "render_µs": 9800 }. These are shown alongside the primary metric for tradeoff monitoring.',
-    })
+    }),
   ),
   force: Type.Optional(
     Type.Boolean({
       description:
         "Set to true to allow adding a new secondary metric that wasn't tracked before. Only use for metrics that have proven very valuable to watch.",
-    })
+    }),
   ),
 });
 
@@ -184,18 +189,24 @@ function formatNum(value: number | null, unit: string): string {
 function isBetter(
   current: number,
   best: number,
-  direction: "lower" | "higher"
+  direction: "lower" | "higher",
 ): boolean {
   return direction === "lower" ? current < best : current > best;
 }
 
 /** Get results in the current segment only */
-function currentResults(results: ExperimentResult[], segment: number): ExperimentResult[] {
+function currentResults(
+  results: ExperimentResult[],
+  segment: number,
+): ExperimentResult[] {
   return results.filter((r) => r.segment === segment);
 }
 
 /** Baseline = first experiment in current segment */
-function findBaselineMetric(results: ExperimentResult[], segment: number): number | null {
+function findBaselineMetric(
+  results: ExperimentResult[],
+  segment: number,
+): number | null {
   const cur = currentResults(results, segment);
   return cur.length > 0 ? cur[0].metric : null;
 }
@@ -208,12 +219,11 @@ function findBaselineMetric(results: ExperimentResult[], segment: number): numbe
 function findBaselineSecondary(
   results: ExperimentResult[],
   segment: number,
-  knownMetrics?: MetricDef[]
+  knownMetrics?: MetricDef[],
 ): Record<string, number> {
   const cur = currentResults(results, segment);
-  const base: Record<string, number> = cur.length > 0
-    ? { ...(cur[0].metrics ?? {}) }
-    : {};
+  const base: Record<string, number> =
+    cur.length > 0 ? { ...(cur[0].metrics ?? {}) } : {};
 
   // Fill in any known metrics missing from baseline with their first occurrence
   if (knownMetrics) {
@@ -245,7 +255,7 @@ function renderDashboardLines(
   st: ExperimentState,
   width: number,
   th: Theme,
-  maxRows: number = 6
+  maxRows: number = 6,
 ): string[] {
   const lines: string[] = [];
 
@@ -261,7 +271,11 @@ function renderDashboardLines(
   const checksFailed = cur.filter((r) => r.status === "checks_failed").length;
 
   const baseline = st.bestMetric;
-  const baselineSec = findBaselineSecondary(st.results, st.currentSegment, st.secondaryMetrics);
+  const baselineSec = findBaselineSecondary(
+    st.results,
+    st.currentSegment,
+    st.secondaryMetrics,
+  );
 
   // Find best kept primary metric and its run number (current segment only)
   let bestPrimary: number | null = null;
@@ -271,7 +285,10 @@ function renderDashboardLines(
     const r = st.results[i];
     if (r.segment !== st.currentSegment) continue;
     if (r.status === "keep" && r.metric > 0) {
-      if (bestPrimary === null || isBetter(r.metric, bestPrimary, st.bestDirection)) {
+      if (
+        bestPrimary === null ||
+        isBetter(r.metric, bestPrimary, st.bestDirection)
+      ) {
         bestPrimary = r.metric;
         bestSecondary = r.metrics ?? {};
         bestRunNum = i + 1;
@@ -284,21 +301,24 @@ function renderDashboardLines(
     truncateToWidth(
       `  ${th.fg("muted", "Runs:")} ${th.fg("text", String(st.results.length))}` +
         `  ${th.fg("success", `${kept} kept`)}` +
-        (discarded > 0 ? `  ${th.fg("warning", `${discarded} discarded`)}` : "") +
+        (discarded > 0
+          ? `  ${th.fg("warning", `${discarded} discarded`)}`
+          : "") +
         (crashed > 0 ? `  ${th.fg("error", `${crashed} crashed`)}` : "") +
-        (checksFailed > 0 ? `  ${th.fg("error", `${checksFailed} checks failed`)}` : ""),
-      width
-    )
+        (checksFailed > 0
+          ? `  ${th.fg("error", `${checksFailed} checks failed`)}`
+          : ""),
+      width,
+    ),
   );
 
   // Baseline: first run's primary metric
   lines.push(
     truncateToWidth(
       `  ${th.fg("muted", "Baseline:")} ${th.fg("dim", `★ ${st.metricName}: ${formatNum(baseline, st.metricUnit)} #1`)}`,
-      width
-    )
+      width,
+    ),
   );
-
 
   // Progress: best primary metric with delta + run number
   if (bestPrimary !== null) {
@@ -307,7 +327,9 @@ function renderDashboardLines(
     if (baseline !== null && baseline !== 0 && bestPrimary !== baseline) {
       const pct = ((bestPrimary - baseline) / baseline) * 100;
       const sign = pct > 0 ? "+" : "";
-      const color = isBetter(bestPrimary, baseline, st.bestDirection) ? "success" : "error";
+      const color = isBetter(bestPrimary, baseline, st.bestDirection)
+        ? "success"
+        : "error";
       progressLine += th.fg(color, ` (${sign}${pct.toFixed(1)}%)`);
     }
 
@@ -334,8 +356,8 @@ function renderDashboardLines(
         lines.push(
           truncateToWidth(
             `  ${th.fg("dim", "          ")}${th.fg("muted", secParts.join("  "))}`,
-            width
-          )
+            width,
+          ),
         );
       }
     }
@@ -350,7 +372,7 @@ function renderDashboardLines(
 
   // Only show secondary metric columns that have at least one value in visible rows
   const secMetrics = st.secondaryMetrics.filter((sm) =>
-    visibleRows.some((r) => (r.metrics ?? {})[sm.name] !== undefined)
+    visibleRows.some((r) => (r.metrics ?? {})[sm.name] !== undefined),
   );
 
   // Column definitions
@@ -359,7 +381,7 @@ function renderDashboardLines(
   const totalSecWidth = secMetrics.length * secColWidth;
   const descW = Math.max(
     10,
-    width - col.idx - col.commit - col.primary - totalSecWidth - col.status - 6
+    width - col.idx - col.commit - col.primary - totalSecWidth - col.status - 6,
   );
 
   // Table header — primary metric name bolded with ★
@@ -371,7 +393,7 @@ function renderDashboardLines(
   for (const sm of secMetrics) {
     headerLine += th.fg(
       "muted",
-      sm.name.slice(0, secColWidth - 1).padEnd(secColWidth)
+      sm.name.slice(0, secColWidth - 1).padEnd(secColWidth),
     );
   }
 
@@ -381,10 +403,7 @@ function renderDashboardLines(
 
   lines.push(truncateToWidth(headerLine, width));
   lines.push(
-    truncateToWidth(
-      `  ${th.fg("borderMuted", "─".repeat(width - 4))}`,
-      width
-    )
+    truncateToWidth(`  ${th.fg("borderMuted", "─".repeat(width - 4))}`, width),
   );
 
   // Baseline values for delta display (current segment only)
@@ -392,7 +411,7 @@ function renderDashboardLines(
   const baselineSecondary = findBaselineSecondary(
     st.results,
     st.currentSegment,
-    st.secondaryMetrics
+    st.secondaryMetrics,
   );
 
   // Show max 6 recent runs, with a note about hidden earlier ones
@@ -400,15 +419,17 @@ function renderDashboardLines(
     lines.push(
       truncateToWidth(
         `  ${th.fg("dim", `… ${startIdx} earlier run${startIdx === 1 ? "" : "s"}`)}`,
-        width
-      )
+        width,
+      ),
     );
   }
 
   for (let i = startIdx; i < st.results.length; i++) {
     const r = st.results[i];
     const isOld = r.segment !== st.currentSegment;
-    const isBaseline = !isOld && i === st.results.findIndex((x) => x.segment === st.currentSegment);
+    const isBaseline =
+      !isOld &&
+      i === st.results.findIndex((x) => x.segment === st.currentSegment);
 
     const color = isOld
       ? "dim"
@@ -438,7 +459,9 @@ function renderDashboardLines(
     }
 
     const idxStr = th.fg("dim", String(i + 1).padEnd(col.idx));
-    const commitStr = isOld ? "(old)".padEnd(col.commit) : r.commit.padEnd(col.commit);
+    const commitStr = isOld
+      ? "(old)".padEnd(col.commit)
+      : r.commit.padEnd(col.commit);
 
     let rowLine =
       `  ${idxStr}` +
@@ -495,7 +518,11 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
   let autoResumeTurns = 0;
 
   // Track last run's checks result so log_experiment can gate "keep" status
-  let lastRunChecks: { pass: boolean; output: string; duration: number } | null = null;
+  let lastRunChecks: {
+    pass: boolean;
+    output: string;
+    duration: number;
+  } | null = null;
 
   // Running experiment state (for spinner in fullscreen overlay)
   let runningExperiment: { startedAt: number; command: string } | null = null;
@@ -554,7 +581,11 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
     try {
       if (fs.existsSync(jsonlPath)) {
         let segment = 0;
-        const lines = fs.readFileSync(jsonlPath, "utf-8").trim().split("\n").filter(Boolean);
+        const lines = fs
+          .readFileSync(jsonlPath, "utf-8")
+          .trim()
+          .split("\n")
+          .filter(Boolean);
         for (const line of lines) {
           try {
             const entry = JSON.parse(line);
@@ -563,8 +594,10 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
             if (entry.type === "config") {
               if (entry.name) state.name = entry.name;
               if (entry.metricName) state.metricName = entry.metricName;
-              if (entry.metricUnit !== undefined) state.metricUnit = entry.metricUnit;
-              if (entry.bestDirection) state.bestDirection = entry.bestDirection;
+              if (entry.metricUnit !== undefined)
+                state.metricUnit = entry.metricUnit;
+              if (entry.bestDirection)
+                state.bestDirection = entry.bestDirection;
               // Increment segment (first config = 0, second = 1, etc.)
               if (state.results.length > 0) segment++;
               state.currentSegment = segment;
@@ -587,8 +620,10 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
               if (!state.secondaryMetrics.find((m) => m.name === name)) {
                 let unit = "";
                 if (name.endsWith("_µs") || name.includes("µs")) unit = "µs";
-                else if (name.endsWith("_ms") || name.includes("ms")) unit = "ms";
-                else if (name.endsWith("_s") || name.includes("sec")) unit = "s";
+                else if (name.endsWith("_ms") || name.includes("ms"))
+                  unit = "ms";
+                else if (name.endsWith("_s") || name.includes("sec"))
+                  unit = "s";
                 state.secondaryMetrics.push({ name, unit });
               }
             }
@@ -598,7 +633,10 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         }
         if (state.results.length > 0) {
           loadedFromJsonl = true;
-          state.bestMetric = findBaselineMetric(state.results, state.currentSegment);
+          state.bestMetric = findBaselineMetric(
+            state.results,
+            state.currentSegment,
+          );
         }
       }
     } catch {
@@ -656,15 +694,18 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         if (label.length > maxLabelLen) {
           label = label.slice(0, maxLabelLen - 1) + "…";
         }
-        const fillLen = Math.max(0, width - 3 - 1 - label.length - 1 - hintText.length);
+        const fillLen = Math.max(
+          0,
+          width - 3 - 1 - label.length - 1 - hintText.length,
+        );
         lines.push(
           truncateToWidth(
             theme.fg("borderMuted", "───") +
               theme.fg("accent", " " + label + " ") +
               theme.fg("borderMuted", "─".repeat(fillLen)) +
               theme.fg("dim", hintText),
-            width
-          )
+            width,
+          ),
         );
 
         lines.push(...renderDashboardLines(state, width, theme));
@@ -677,9 +718,15 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         const cur = currentResults(state.results, state.currentSegment);
         const kept = cur.filter((r) => r.status === "keep").length;
         const crashed = cur.filter((r) => r.status === "crash").length;
-        const checksFailed = cur.filter((r) => r.status === "checks_failed").length;
+        const checksFailed = cur.filter(
+          (r) => r.status === "checks_failed",
+        ).length;
         const baseline = state.bestMetric;
-        const baselineSec = findBaselineSecondary(state.results, state.currentSegment, state.secondaryMetrics);
+        const baselineSec = findBaselineSecondary(
+          state.results,
+          state.currentSegment,
+          state.secondaryMetrics,
+        );
 
         // Find best kept primary metric, its secondary values, and run number
         let bestPrimary: number | null = null;
@@ -689,7 +736,10 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           const r = state.results[i];
           if (r.segment !== state.currentSegment) continue;
           if (r.status === "keep" && r.metric > 0) {
-            if (bestPrimary === null || isBetter(r.metric, bestPrimary, state.bestDirection)) {
+            if (
+              bestPrimary === null ||
+              isBetter(r.metric, bestPrimary, state.bestDirection)
+            ) {
               bestPrimary = r.metric;
               bestSec = r.metrics ?? {};
               bestRunNum = i + 1;
@@ -705,15 +755,31 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           crashed > 0 ? theme.fg("error", ` ${crashed}💥`) : "",
           checksFailed > 0 ? theme.fg("error", ` ${checksFailed}⚠`) : "",
           theme.fg("dim", " │ "),
-          theme.fg("warning", theme.bold(`★ ${state.metricName}: ${formatNum(displayVal, state.metricUnit)}`)),
+          theme.fg(
+            "warning",
+            theme.bold(
+              `★ ${state.metricName}: ${formatNum(displayVal, state.metricUnit)}`,
+            ),
+          ),
           bestRunNum > 0 ? theme.fg("dim", ` #${bestRunNum}`) : "",
         ];
 
         // Show delta % vs baseline for primary
-        if (baseline !== null && bestPrimary !== null && baseline !== 0 && bestPrimary !== baseline) {
+        if (
+          baseline !== null &&
+          bestPrimary !== null &&
+          baseline !== 0 &&
+          bestPrimary !== baseline
+        ) {
           const pct = ((bestPrimary - baseline) / baseline) * 100;
           const sign = pct > 0 ? "+" : "";
-          const deltaColor = isBetter(bestPrimary, baseline, state.bestDirection) ? "success" : "error";
+          const deltaColor = isBetter(
+            bestPrimary,
+            baseline,
+            state.bestDirection,
+          )
+            ? "success"
+            : "error";
           parts.push(theme.fg(deltaColor, ` (${sign}${pct.toFixed(1)}%)`));
         }
 
@@ -740,7 +806,9 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           parts.push(theme.fg("dim", ` │ ${state.name}`));
         }
 
-        parts.push(theme.fg("dim", "  (ctrl+x expand • ctrl+shift+x fullscreen)"));
+        parts.push(
+          theme.fg("dim", "  (ctrl+x expand • ctrl+shift+x fullscreen)"),
+        );
 
         return new Text(parts.join(""), 0, 0);
       });
@@ -775,7 +843,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
     if (autoResumeTurns >= MAX_AUTORESUME_TURNS) {
       ctx.ui.notify(
         `Autoresearch auto-resume limit reached (${MAX_AUTORESUME_TURNS} turns)`,
-        "info"
+        "info",
       );
       return;
     }
@@ -785,9 +853,12 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
     const ideasPath = path.join(ctx.cwd, "autoresearch.ideas.md");
     const hasIdeas = fs.existsSync(ideasPath);
 
-    let resumeMsg = "Autoresearch loop ended (likely context limit). Resume the experiment loop — read autoresearch.md and git log for context.";
+    let resumeMsg =
+      "Autoresearch loop ended (likely context limit). Resume the experiment loop — read autoresearch.md and git log for context.";
+    resumeMsg += ` Session so far: ${state.results.length} experiments, best ${state.metricName ?? "metric"}: ${state.bestMetric !== null ? formatNum(state.bestMetric, state.metricUnit) : "unknown"}.`;
     if (hasIdeas) {
-      resumeMsg += " Check autoresearch.ideas.md for promising paths to explore. Prune stale/tried ideas.";
+      resumeMsg +=
+        " Check autoresearch.ideas.md for promising paths to explore. Prune stale/tried ideas.";
     }
     resumeMsg += ` ${BENCHMARK_GUARDRAIL}`;
 
@@ -828,6 +899,27 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
     if (hasIdeas) {
       extra += `\n\n💡 Ideas backlog exists at ${ideasPath} — check it for promising experiment paths. Prune stale entries.`;
+    }
+
+    // Inject session state so the agent has instant orientation
+    const curResults = currentResults(state.results, state.currentSegment);
+    const totalRuns = curResults.length;
+    const keptCount = curResults.filter((r) => r.status === "keep").length;
+    const bestVal =
+      state.bestMetric !== null
+        ? formatNum(state.bestMetric, state.metricUnit)
+        : "none yet";
+
+    extra += `\n\nSession state: ${totalRuns} experiments, ${keptCount} kept. Best ${state.metricName ?? "metric"}: ${bestVal}.`;
+
+    // Consecutive discard streak (count backwards from most recent)
+    let discardStreak = 0;
+    for (let i = curResults.length - 1; i >= 0; i--) {
+      if (curResults[i].status !== "keep") discardStreak++;
+      else break;
+    }
+    if (discardStreak >= 3) {
+      extra += `\n⚠️ ${discardStreak} consecutive non-keeps. Consider pivoting to a different approach.`;
     }
 
     return {
@@ -885,10 +977,12 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         }
       } catch (e) {
         return {
-          content: [{
-            type: "text",
-            text: `⚠️ Failed to write autoresearch.jsonl: ${e instanceof Error ? e.message : String(e)}`,
-          }],
+          content: [
+            {
+              type: "text",
+              text: `⚠️ Failed to write autoresearch.jsonl: ${e instanceof Error ? e.message : String(e)}`,
+            },
+          ],
           details: {},
         };
       }
@@ -896,12 +990,16 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       autoresearchMode = true;
       updateWidget(ctx);
 
-      const reinitNote = isReinit ? " (re-initialized — previous results archived, new baseline needed)" : "";
+      const reinitNote = isReinit
+        ? " (re-initialized — previous results archived, new baseline needed)"
+        : "";
       return {
-        content: [{
-          type: "text",
-          text: `✅ Experiment initialized: "${state.name}"${reinitNote}\nMetric: ${state.metricName} (${state.metricUnit || "unitless"}, ${state.bestDirection} is better)\nConfig written to autoresearch.jsonl. Now run the baseline with run_experiment.`,
-        }],
+        content: [
+          {
+            type: "text",
+            text: `✅ Experiment initialized: "${state.name}"${reinitNote}\nMetric: ${state.metricName} (${state.metricUnit || "unitless"}, ${state.bestDirection} is better)\nConfig written to autoresearch.jsonl. Now run the baseline with run_experiment.`,
+          },
+        ],
         details: { state: { ...state } },
       };
     },
@@ -983,7 +1081,11 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           checksDuration = (Date.now() - ct0) / 1000;
           checksTimedOut = !!checksResult.killed;
           checksPass = checksResult.code === 0 && !checksResult.killed;
-          checksOutput = (checksResult.stdout + "\n" + checksResult.stderr).trim();
+          checksOutput = (
+            checksResult.stdout +
+            "\n" +
+            checksResult.stderr
+          ).trim();
         } catch (e) {
           checksDuration = (Date.now() - ct0) / 1000;
           checksPass = false;
@@ -992,7 +1094,10 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       }
 
       // Store checks result for log_experiment gate
-      lastRunChecks = checksPass !== null ? { pass: checksPass, output: checksOutput, duration: checksDuration } : null;
+      lastRunChecks =
+        checksPass !== null
+          ? { pass: checksPass, output: checksOutput, duration: checksDuration }
+          : null;
 
       // Overall pass: benchmark must pass AND checks must pass (if they ran)
       const passed = benchmarkPassed && (checksPass === null || checksPass);
@@ -1064,11 +1169,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
     renderResult(result, { expanded, isPartial }, theme) {
       if (isPartial) {
-        return new Text(
-          theme.fg("warning", "⏳ Running experiment..."),
-          0,
-          0
-        );
+        return new Text(theme.fg("warning", "⏳ Running experiment..."), 0, 0);
       }
 
       const d = result.details as RunDetails | undefined;
@@ -1080,7 +1181,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       if (d.timedOut) {
         let text = theme.fg(
           "error",
-          `⏰ TIMEOUT ${d.durationSeconds.toFixed(1)}s`
+          `⏰ TIMEOUT ${d.durationSeconds.toFixed(1)}s`,
         );
         if (expanded) text += "\n" + theme.fg("dim", d.tailOutput.slice(-500));
         return new Text(text, 0, 0);
@@ -1090,7 +1191,10 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         // Benchmark passed but checks timed out
         let text =
           theme.fg("success", `✅ ${d.durationSeconds.toFixed(1)}s`) +
-          theme.fg("error", ` ⏰ checks timeout ${d.checksDuration.toFixed(1)}s`);
+          theme.fg(
+            "error",
+            ` ⏰ checks timeout ${d.checksDuration.toFixed(1)}s`,
+          );
         if (expanded) {
           text += "\n" + theme.fg("dim", d.checksOutput.slice(-500));
         }
@@ -1101,7 +1205,10 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         // Benchmark passed but checks failed
         let text =
           theme.fg("success", `✅ ${d.durationSeconds.toFixed(1)}s`) +
-          theme.fg("error", ` 💥 checks failed ${d.checksDuration.toFixed(1)}s`);
+          theme.fg(
+            "error",
+            ` 💥 checks failed ${d.checksDuration.toFixed(1)}s`,
+          );
         if (expanded) {
           text += "\n" + theme.fg("dim", d.checksOutput.slice(-500));
         }
@@ -1111,7 +1218,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       if (d.crashed) {
         let text = theme.fg(
           "error",
-          `💥 FAIL exit=${d.exitCode} ${d.durationSeconds.toFixed(1)}s`
+          `💥 FAIL exit=${d.exitCode} ${d.durationSeconds.toFixed(1)}s`,
         );
         if (expanded) text += "\n" + theme.fg("dim", d.tailOutput.slice(-500));
         return new Text(text, 0, 0);
@@ -1122,7 +1229,10 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         theme.fg("accent", `${d.durationSeconds.toFixed(1)}s`);
 
       if (d.checksPass === true) {
-        text += theme.fg("success", ` ✓ checks ${d.checksDuration.toFixed(1)}s`);
+        text += theme.fg(
+          "success",
+          ` ✓ checks ${d.checksDuration.toFixed(1)}s`,
+        );
       }
 
       if (expanded) {
@@ -1159,10 +1269,12 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       // Gate: prevent "keep" when last run's checks failed
       if (params.status === "keep" && lastRunChecks && !lastRunChecks.pass) {
         return {
-          content: [{
-            type: "text",
-            text: `❌ Cannot keep — autoresearch.checks.sh failed.\n\n${lastRunChecks.output.slice(-500)}\n\nLog as 'checks_failed' instead. The benchmark metric is valid but correctness checks did not pass.`,
-          }],
+          content: [
+            {
+              type: "text",
+              text: `❌ Cannot keep — autoresearch.checks.sh failed.\n\n${lastRunChecks.output.slice(-500)}\n\nLog as 'checks_failed' instead. The benchmark metric is valid but correctness checks did not pass.`,
+            },
+          ],
           details: {},
         };
       }
@@ -1176,10 +1288,12 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         const missing = [...knownNames].filter((n) => !providedNames.has(n));
         if (missing.length > 0) {
           return {
-            content: [{
-              type: "text",
-              text: `❌ Missing secondary metrics: ${missing.join(", ")}\n\nYou must provide all previously tracked metrics. Expected: ${[...knownNames].join(", ")}\nGot: ${[...providedNames].join(", ") || "(none)"}\n\nFix: include ${missing.map((m) => `"${m}": <value>`).join(", ")} in the metrics parameter.`,
-            }],
+            content: [
+              {
+                type: "text",
+                text: `❌ Missing secondary metrics: ${missing.join(", ")}\n\nYou must provide all previously tracked metrics. Expected: ${[...knownNames].join(", ")}\nGot: ${[...providedNames].join(", ") || "(none)"}\n\nFix: include ${missing.map((m) => `"${m}": <value>`).join(", ")} in the metrics parameter.`,
+              },
+            ],
             details: {},
           };
         }
@@ -1188,10 +1302,12 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         const newMetrics = [...providedNames].filter((n) => !knownNames.has(n));
         if (newMetrics.length > 0 && !params.force) {
           return {
-            content: [{
-              type: "text",
-              text: `❌ New secondary metric${newMetrics.length > 1 ? "s" : ""} not previously tracked: ${newMetrics.join(", ")}\n\nExisting metrics: ${[...knownNames].join(", ")}\n\nIf this metric has proven very valuable to watch, call log_experiment again with force: true to add it. Otherwise, remove it from the metrics parameter.`,
-            }],
+            content: [
+              {
+                type: "text",
+                text: `❌ New secondary metric${newMetrics.length > 1 ? "s" : ""} not previously tracked: ${newMetrics.join(", ")}\n\nExisting metrics: ${[...knownNames].join(", ")}\n\nIf this metric has proven very valuable to watch, call log_experiment again with force: true to add it. Otherwise, remove it from the metrics parameter.`,
+              },
+            ],
             details: {},
           };
         }
@@ -1222,10 +1338,16 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       }
 
       // Baseline = first run in current segment
-      state.bestMetric = findBaselineMetric(state.results, state.currentSegment);
+      state.bestMetric = findBaselineMetric(
+        state.results,
+        state.currentSegment,
+      );
 
       // Build response text
-      const curCount = currentResults(state.results, state.currentSegment).length;
+      const curCount = currentResults(
+        state.results,
+        state.currentSegment,
+      ).length;
       let text = `Logged #${state.results.length}: ${experiment.status} — ${experiment.description}`;
 
       if (state.bestMetric !== null) {
@@ -1240,7 +1362,11 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
       // Show secondary metrics
       if (Object.keys(secondaryMetrics).length > 0) {
-        const baselines = findBaselineSecondary(state.results, state.currentSegment, state.secondaryMetrics);
+        const baselines = findBaselineSecondary(
+          state.results,
+          state.currentSegment,
+          state.secondaryMetrics,
+        );
         const parts: string[] = [];
         for (const [name, value] of Object.entries(secondaryMetrics)) {
           const def = state.secondaryMetrics.find((m) => m.name === name);
@@ -1271,9 +1397,14 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
           const trailerJson = JSON.stringify(resultData);
           const commitMsg = `${params.description}\n\nResult: ${trailerJson}`;
 
-          const gitResult = await pi.exec("bash", ["-c",
-            `git add -A && git diff --cached --quiet && echo "NOTHING_TO_COMMIT" || git commit -m ${JSON.stringify(commitMsg)}`
-          ], { cwd: ctx.cwd, timeout: 10000 });
+          const gitResult = await pi.exec(
+            "bash",
+            [
+              "-c",
+              `git add -A && git diff --cached --quiet && echo "NOTHING_TO_COMMIT" || git commit -m ${JSON.stringify(commitMsg)}`,
+            ],
+            { cwd: ctx.cwd, timeout: 10000 },
+          );
 
           const gitOutput = (gitResult.stdout + gitResult.stderr).trim();
           if (gitOutput.includes("NOTHING_TO_COMMIT")) {
@@ -1284,7 +1415,11 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
             // Update experiment record with the actual new commit hash
             try {
-              const shaResult = await pi.exec("git", ["rev-parse", "--short=7", "HEAD"], { cwd: ctx.cwd, timeout: 5000 });
+              const shaResult = await pi.exec(
+                "git",
+                ["rev-parse", "--short=7", "HEAD"],
+                { cwd: ctx.cwd, timeout: 5000 },
+              );
               const newSha = (shaResult.stdout || "").trim();
               if (newSha && newSha.length >= 7) {
                 experiment.commit = newSha;
@@ -1304,7 +1439,8 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
       // Doc update reminder (every 10 experiments or on keep)
       const totalExperiments = state.results.length;
-      const shouldRemindDoc = totalExperiments % 10 === 0 || params.status === "keep";
+      const shouldRemindDoc =
+        totalExperiments % 10 === 0 || params.status === "keep";
       if (shouldRemindDoc) {
         text += `\n\n📝 Doc reminder: update autotrain.md "What's Been Tried" and commit it.`;
         text += `\n   git add autotrain.md && git commit -m "doc: update session notes"`;
@@ -1313,10 +1449,13 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       // Persist to autoresearch.jsonl AFTER git commit (so commit hash is correct)
       try {
         const jsonlPath = path.join(ctx.cwd, "autoresearch.jsonl");
-        fs.appendFileSync(jsonlPath, JSON.stringify({
-          run: state.results.length,
-          ...experiment,
-        }) + "\n");
+        fs.appendFileSync(
+          jsonlPath,
+          JSON.stringify({
+            run: state.results.length,
+            ...experiment,
+          }) + "\n",
+        );
       } catch {
         // Don't fail if write fails
       }
@@ -1364,20 +1503,27 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
             ? "error"
             : "warning";
       const icon =
-        exp.status === "keep" ? "✓" : exp.status === "crash" ? "✗" : exp.status === "checks_failed" ? "⚠" : "–";
+        exp.status === "keep"
+          ? "✓"
+          : exp.status === "crash"
+            ? "✗"
+            : exp.status === "checks_failed"
+              ? "⚠"
+              : "–";
 
       let text =
         theme.fg(color, `${icon} `) +
         theme.fg("accent", `#${s.results.length}`);
-
-
 
       text += " " + theme.fg("muted", exp.description);
 
       if (s.bestMetric !== null) {
         text +=
           theme.fg("dim", " │ ") +
-          theme.fg("warning", theme.bold(`★ ${formatNum(s.bestMetric, s.metricUnit)}`));
+          theme.fg(
+            "warning",
+            theme.bold(`★ ${formatNum(s.bestMetric, s.metricUnit)}`),
+          );
       }
 
       // Show secondary metrics inline
@@ -1402,8 +1548,14 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
     description: "Toggle autoresearch dashboard",
     handler: async (ctx) => {
       if (state.results.length === 0) {
-        if (!autoresearchMode && !fs.existsSync(path.join(ctx.cwd, "autoresearch.md"))) {
-          ctx.ui.notify("No experiments yet — run /autoresearch to get started", "info");
+        if (
+          !autoresearchMode &&
+          !fs.existsSync(path.join(ctx.cwd, "autoresearch.md"))
+        ) {
+          ctx.ui.notify(
+            "No experiments yet — run /autoresearch to get started",
+            "info",
+          );
         } else {
           ctx.ui.notify("No experiments yet", "info");
         }
@@ -1453,15 +1605,17 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
               // Add running experiment as next row in the list
               if (runningExperiment) {
-                const elapsed = formatElapsed(Date.now() - runningExperiment.startedAt);
+                const elapsed = formatElapsed(
+                  Date.now() - runningExperiment.startedAt,
+                );
                 const frame = SPINNER[spinnerFrame % SPINNER.length];
                 const nextIdx = state.results.length + 1;
                 content.push(
                   truncateToWidth(
                     `  ${theme.fg("dim", String(nextIdx).padEnd(3))}` +
-                    theme.fg("warning", `${frame} running… ${elapsed}`),
-                    width
-                  )
+                      theme.fg("warning", `${frame} running… ${elapsed}`),
+                    width,
+                  ),
                 );
               }
 
@@ -1487,14 +1641,17 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
               out.push(
                 truncateToWidth(
                   theme.fg("borderMuted", "───") +
-                  theme.fg("accent", " " + title + " ") +
-                  theme.fg("borderMuted", "─".repeat(fillLen)),
-                  width
-                )
+                    theme.fg("accent", " " + title + " ") +
+                    theme.fg("borderMuted", "─".repeat(fillLen)),
+                  width,
+                ),
               );
 
               // Content rows
-              const visible = content.slice(scrollOffset, scrollOffset + viewportRows);
+              const visible = content.slice(
+                scrollOffset,
+                scrollOffset + viewportRows,
+              );
               for (const line of visible) {
                 out.push(truncateToWidth(line, width));
               }
@@ -1504,17 +1661,18 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
               }
 
               // Footer line
-              const scrollInfo = totalRows > viewportRows
-                ? ` ${scrollOffset + 1}-${Math.min(scrollOffset + viewportRows, totalRows)}/${totalRows}`
-                : "";
+              const scrollInfo =
+                totalRows > viewportRows
+                  ? ` ${scrollOffset + 1}-${Math.min(scrollOffset + viewportRows, totalRows)}/${totalRows}`
+                  : "";
               const helpText = ` ↑↓/j/k scroll • esc close${scrollInfo} `;
               const footFill = Math.max(0, width - helpText.length);
               out.push(
                 truncateToWidth(
                   theme.fg("borderMuted", "─".repeat(footFill)) +
-                  theme.fg("dim", helpText),
-                  width
-                )
+                    theme.fg("dim", helpText),
+                  width,
+                ),
               );
 
               return out;
@@ -1523,7 +1681,8 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
             handleInput(data: string): void {
               const termH = process.stdout.rows || 40;
               const viewportRows = Math.max(4, termH - 4);
-              const totalRows = state.results.length + (runningExperiment ? 1 : 0) + 15; // rough estimate
+              const totalRows =
+                state.results.length + (runningExperiment ? 1 : 0) + 15; // rough estimate
               const maxScroll = Math.max(0, totalRows - viewportRows);
 
               if (matchesKey(data, "escape") || data === "q") {
@@ -1564,7 +1723,7 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
             maxHeight: "90%",
             anchor: "center" as const,
           },
-        }
+        },
       );
     },
   });
@@ -1611,9 +1770,15 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
 
         if (fs.existsSync(jsonlPath)) {
           fs.unlinkSync(jsonlPath);
-          ctx.ui.notify("Deleted autoresearch.jsonl and turned autoresearch mode OFF", "info");
+          ctx.ui.notify(
+            "Deleted autoresearch.jsonl and turned autoresearch mode OFF",
+            "info",
+          );
         } else {
-          ctx.ui.notify("No autoresearch.jsonl found. Autoresearch mode OFF", "info");
+          ctx.ui.notify(
+            "No autoresearch.jsonl found. Autoresearch mode OFF",
+            "info",
+          );
         }
         return;
       }
@@ -1625,12 +1790,20 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
       const hasRules = fs.existsSync(mdPath);
 
       if (hasRules) {
-        ctx.ui.notify("Autoresearch mode ON — rules loaded from autoresearch.md", "info");
-        pi.sendUserMessage(`Autoresearch mode active. ${trimmedArgs} ${BENCHMARK_GUARDRAIL}`);
-      } else {
-        ctx.ui.notify("Autoresearch mode ON — no autoresearch.md found, setting up", "info");
+        ctx.ui.notify(
+          "Autoresearch mode ON — rules loaded from autoresearch.md",
+          "info",
+        );
         pi.sendUserMessage(
-          `Start autoresearch: ${trimmedArgs} ${BENCHMARK_GUARDRAIL}`
+          `Autoresearch mode active. ${trimmedArgs} ${BENCHMARK_GUARDRAIL}`,
+        );
+      } else {
+        ctx.ui.notify(
+          "Autoresearch mode ON — no autoresearch.md found, setting up",
+          "info",
+        );
+        pi.sendUserMessage(
+          `Start autoresearch: ${trimmedArgs} ${BENCHMARK_GUARDRAIL}`,
         );
       }
     },
