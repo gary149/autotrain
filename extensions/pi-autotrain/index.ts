@@ -8,7 +8,7 @@
  * - `run_experiment` tool — runs any command, times it, captures output, detects pass/fail
  * - `log_experiment` tool — records results with session-persisted state
  * - Status widget showing experiment count + best metric
- * - Ctrl+X toggle to expand/collapse full dashboard inline above the editor
+ * - Ctrl+Y toggle to expand/collapse full dashboard inline above the editor
  * - Injects autotrain.md into context on every turn via before_agent_start
  */
 
@@ -685,7 +685,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
         const width = process.stdout.columns || 120;
         const lines: string[] = [];
 
-        const hintText = " ctrl+x collapse • ctrl+shift+x fullscreen ";
+        const hintText = " ctrl+y collapse • ctrl+shift+y fullscreen ";
         const labelPrefix = "🔬 autotrain";
         const nameStr = state.name ? `: ${state.name}` : "";
         // 3 leading dashes + space + label + space + fill + hint
@@ -807,7 +807,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
         }
 
         parts.push(
-          theme.fg("dim", "  (ctrl+x expand • ctrl+shift+x fullscreen)"),
+          theme.fg("dim", "  (ctrl+y expand • ctrl+shift+y fullscreen)"),
         );
 
         return new Text(parts.join(""), 0, 0);
@@ -1541,10 +1541,10 @@ export default function autotrainExtension(pi: ExtensionAPI) {
   });
 
   // -----------------------------------------------------------------------
-  // Ctrl+R — toggle dashboard expand/collapse
+  // Ctrl+Y — toggle dashboard expand/collapse
   // -----------------------------------------------------------------------
 
-  pi.registerShortcut("ctrl+x", {
+  pi.registerShortcut("ctrl+y", {
     description: "Toggle autotrain dashboard",
     handler: async (ctx) => {
       if (state.results.length === 0) {
@@ -1567,10 +1567,10 @@ export default function autotrainExtension(pi: ExtensionAPI) {
   });
 
   // -----------------------------------------------------------------------
-  // Ctrl+Shift+X — fullscreen scrollable dashboard overlay
+  // Ctrl+Shift+Y — fullscreen scrollable dashboard overlay
   // -----------------------------------------------------------------------
 
-  pi.registerShortcut("ctrl+shift+x", {
+  pi.registerShortcut("ctrl+shift+y", {
     description: "Fullscreen autotrain dashboard",
     handler: async (ctx) => {
       if (state.results.length === 0) {
