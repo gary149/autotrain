@@ -166,17 +166,21 @@ mlx_lm.lora \
   --model <model_name_or_path> \
   --data <data_dir> \
   --train \
-  --batch-size 4 \
+  --batch-size 2 \
+  --grad-accumulation-steps 8 \
   --lora-layers 16 \
   --iters <steps> \
   --learning-rate 1e-5 \
   --adapter-path ./adapters
 ```
 
+**GPU note:** Apple Silicon shares the GPU between training and display. Keep `--batch-size` ≤ 4 to avoid freezing the screen. Use `--grad-accumulation-steps` to maintain effective batch size.
+
 **Typical hyperparameter ranges:**
 | Param | Range | Notes |
 |-------|-------|-------|
-| `--batch-size` | 1–8 | Limited by unified memory |
+| `--batch-size` | 1–4 | **Default 2.** Larger batches can freeze macOS display (GPU starvation). Compensate with `--grad-accumulation-steps`. |
+| `--grad-accumulation-steps` | 2–16 | Effective batch = batch-size × steps. Default 8 (effective 16). |
 | `--lora-layers` | 8–32 | More layers = more capacity but slower |
 | `--iters` | 100–2000 | Start small, increase if undertrained |
 | `--learning-rate` | 1e-6 to 1e-4 | 1e-5 is a safe default |
