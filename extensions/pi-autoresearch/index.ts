@@ -1783,6 +1783,28 @@ export default function autoresearchExtension(pi: ExtensionAPI) {
         return;
       }
 
+      // Check HF auth before starting — fail fast if not logged in
+      try {
+        const hfResult = await pi.exec("hf", ["auth", "whoami"], {
+          cwd: ctx.cwd,
+          timeout: 10000,
+        });
+        const hfOutput = (hfResult.stdout + "\n" + hfResult.stderr).trim();
+        if (hfOutput.includes("Not logged in") || hfResult.code !== 0) {
+          ctx.ui.notify(
+            "Not logged in to Hugging Face. Run: hf auth login",
+            "error",
+          );
+          return;
+        }
+      } catch {
+        ctx.ui.notify(
+          "hf CLI not found. Install: pip install huggingface_hub[cli]",
+          "error",
+        );
+        return;
+      }
+
       autoresearchMode = true;
       autoResumeTurns = 0;
 
