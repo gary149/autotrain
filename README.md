@@ -1,10 +1,12 @@
-# pi-autotrain — autonomous fine-tuning loop for pi
+# pi-autotrain — autonomous training loop for pi
 
 **[Install](#install)** · **[Usage](#usage)** · **[How it works](#how-it-works)**
 
-*Detect hardware, pick framework, curate data, train LoRA adapters, optimize through structured phases — all autonomously.*
+*Gather requirements, curate data, train models, optimize through structured phases — all autonomously.*
 
-A specialized [autoresearch](https://github.com/karpathy/autoresearch) variant for LLM fine-tuning. Instead of generic optimization, autotrain encodes fine-tuning domain knowledge: experiment phase ordering (data > format > architecture > hyperparameters), three-way data splits, overfitting detection, anti-thrash safeguards, and automatic HuggingFace Hub integration.
+A specialized [autoresearch](https://github.com/karpathy/autoresearch) variant for model training. Instead of generic optimization, autotrain encodes training domain knowledge: experiment phase ordering (data > format > architecture > hyperparameters), evaluation strategy design, overfitting detection, anti-thrash safeguards, and automatic HuggingFace Hub integration.
+
+Supports any training paradigm: SFT, DPO, GRPO, RL, pretraining, VLM fine-tuning, reward modeling.
 
 ---
 
@@ -17,7 +19,7 @@ A specialized [autoresearch](https://github.com/karpathy/autoresearch) variant f
 | Component | Description |
 |---|---|
 | **Extension** | Tools + live widget + `/autotrain` dashboard |
-| **Skill** | Detects hardware, selects framework, creates data splits, writes session files, starts the fine-tuning loop |
+| **Skill** | Gathers requirements, selects execution mode, designs evaluation strategy, writes session files, starts the training loop |
 
 ### Extension tools
 
@@ -27,29 +29,39 @@ A specialized [autoresearch](https://github.com/karpathy/autoresearch) variant f
 | `run_experiment` | Runs any command, times wall-clock duration, captures output |
 | `log_experiment` | Records result, auto-commits, updates widget and dashboard |
 
-### Supported frameworks
+### Supported paradigms
 
-| Framework | Hardware | Notes |
-|-----------|----------|-------|
-| **mlx-lm** | Apple Silicon Mac | Native Metal acceleration, unified memory |
-| **unsloth** | NVIDIA GPU | 2-5x faster than TRL, 50-70% less VRAM |
-| **TRL + PEFT** | NVIDIA GPU (fallback) | When unsloth doesn't support the model |
+- **SFT** — supervised fine-tuning with LoRA/full
+- **DPO** — direct preference optimization
+- **GRPO** — group relative policy optimization
+- **RL** — reinforcement learning (games, robotics, control)
+- **Pretraining** — training from scratch on domain text
+- **VLM fine-tuning** — vision-language model adaptation
+- **Reward modeling** — training reward models for RLHF
 
-Hardware is auto-detected at session start. The agent picks the best framework automatically.
+### Execution modes
+
+| Mode | Hardware | Notes |
+|------|----------|-------|
+| **HF Jobs** (default) | Cloud A100/H200 GPUs | Billed per-second, no local GPU required |
+| **Local — mlx-lm** | Apple Silicon Mac | Native Metal acceleration, unified memory |
+| **Local — unsloth** | NVIDIA GPU | 2-5x faster than TRL, 50-70% less VRAM |
+| **Local — TRL + PEFT** | NVIDIA GPU (fallback) | When unsloth doesn't support the model |
+| **Local — native PyTorch** | Any GPU | For paradigms without framework support |
 
 ### HuggingFace integration
 
 After every successful experiment (`keep`):
-- Adapter uploaded to HF Hub
+- Model output uploaded to HF Hub
 - Session notes synced
 - Model card created and updated with results table
 
 ### Skill
 
-`autotrain-create` gathers your goal, base model, dataset, and constraints — then:
+`autotrain-create` gathers your goal, training paradigm, model, dataset/environment, and constraints — then:
 
-1. Detects hardware and selects framework
-2. Creates a three-way data split (train/val/test)
+1. Selects execution mode and hardware
+2. Designs an evaluation strategy (dataset splits, rollout protocol, or hybrid)
 3. Writes session files and commits them
 4. Runs a baseline and starts the optimization loop
 
@@ -57,7 +69,7 @@ After every successful experiment (`keep`):
 
 | File | Purpose |
 |------|---------|
-| `autotrain.md` | Living session document — objective, hardware, metrics, data splits, phase ordering, anti-thrash rules, what's been tried. A fresh agent can resume from this alone. |
+| `autotrain.md` | Living session document — objective, paradigm, model config, metrics, evaluation strategy, phase ordering, anti-thrash rules, what's been tried. A fresh agent can resume from this alone. |
 | `autotrain.sh` | Training + evaluation script — pre-checks, trains the model, evaluates on test split, outputs `METRIC name=number` lines. |
 | `autotrain.checks.sh` | *(optional)* Backpressure checks — correctness validation that blocks `keep` on failure. |
 
@@ -91,10 +103,9 @@ Then `/reload` in pi.
 /skill:autotrain-create
 ```
 
-The agent asks about your goal, base model, dataset, and constraints. It then:
-- Detects your hardware (Apple Silicon or NVIDIA)
-- Selects the best framework (mlx-lm, unsloth, or TRL)
-- Creates train/val/test splits
+The agent asks about your goal, training paradigm, model, dataset/environment, and constraints. It then:
+- Selects execution mode and hardware
+- Designs the evaluation strategy
 - Writes `autotrain.md` and `autotrain.sh`
 - Commits everything
 - Runs the baseline and starts looping
@@ -104,14 +115,14 @@ The agent asks about your goal, base model, dataset, and constraints. It then:
 Autotrain follows a **strict phase order**:
 
 ```
-Phase 1: Data Quality        ← HIGHEST leverage, explore first
-Phase 2: Prompt & Output Format
-Phase 3: LoRA Architecture
+Phase 1: Data Quality              ← HIGHEST leverage, explore first
+Phase 2: Input & Output Format
+Phase 3: Model & Architecture Config
 Phase 4: Training Hyperparameters
-Phase 5: Regularization      ← only if overfitting visible
+Phase 5: Regularization            ← only if overfitting visible
 ```
 
-The agent won't jump to hyperparameter tuning before exhausting data and format improvements. This prevents the most common fine-tuning mistake: tweaking learning rates when the training data needs curation.
+The agent won't jump to hyperparameter tuning before exhausting data and format improvements. This prevents the most common training mistake: tweaking learning rates when the training data needs curation.
 
 ### 3. Anti-thrash safeguards
 
@@ -123,10 +134,10 @@ The agent monitors its own progress and self-corrects:
 
 ### 4. Validation protocol
 
-Three-way split prevents overfitting:
-- **Train** — gradient updates
-- **Val** — checkpoint selection during training
-- **Test** — keep/discard decisions (fixed, never modified)
+Evaluation strategy depends on the paradigm:
+- **Dataset-based** (SFT, DPO, RM) — three-way split: train/val/test
+- **Rollout-based** (RL, games) — fixed eval environment/seed
+- **Hybrid** (RLHF) — both
 
 Plus **fresh validation** every 10 experiments to catch overfitting to the test set.
 
@@ -163,7 +174,7 @@ Phase 2: Prompt Format
   #5  SAN instead of UCI  exact_accuracy=18.6%  keep  ← format matters
   #6  add piece counts    exact_accuracy=18.4%  discard
 
-Phase 3: LoRA Architecture
+Phase 3: Model & Architecture Config
   #7  rank 16→32        exact_accuracy=19.1%    keep
 
 Phase 4: Training Hyperparameters
@@ -175,24 +186,25 @@ Phase 4: Training Hyperparameters
 
 ## How it works
 
-The **extension** is domain-agnostic infrastructure. The **skill** encodes fine-tuning domain knowledge. This separation means the extension handles all the plumbing (git, metrics, dashboard) while the skill knows about LoRA, data splits, and training frameworks.
+The **extension** is domain-agnostic infrastructure. The **skill** encodes training domain knowledge. This separation means the extension handles all the plumbing (git, metrics, dashboard) while the skill knows about experiment phases, evaluation strategies, and training workflows.
 
 ```
 ┌──────────────────────┐     ┌────────────────────────────────┐
-│  Extension (global)  │     │  Skill (fine-tuning domain)    │
+│  Extension (global)  │     │  Skill (training domain)       │
 │                      │     │                                │
-│  run_experiment      │◄────│  framework: mlx-lm / unsloth   │
-│  log_experiment      │     │  phases: data > format > arch   │
-│  widget + dashboard  │     │  validation: 3-way split        │
-│                      │     │  anti-thrash: self-monitoring   │
-└──────────────────────┘     └────────────────────────────────┘
+│  run_experiment      │◄────│  phases: data > format > arch   │
+│  log_experiment      │     │  evaluation: splits / rollouts  │
+│  widget + dashboard  │     │  anti-thrash: self-monitoring   │
+│                      │     │  references: HF Jobs, local,   │
+└──────────────────────┘     │    HF integration              │
+                             └────────────────────────────────┘
 ```
 
 Two files keep the session alive across restarts and context resets:
 
 ```
 autotrain.jsonl      — append-only log of every run (metric, status, commit, description)
-autotrain.md         — living document: objective, hardware, phases, what's been tried
+autotrain.md         — living document: objective, paradigm, phases, what's been tried
 ```
 
 A fresh agent with no memory can read these two files and continue exactly where the previous session left off.

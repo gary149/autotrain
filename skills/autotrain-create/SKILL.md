@@ -1,11 +1,11 @@
 ---
 name: autotrain-create
-description: Set up and run an autonomous fine-tuning loop for LLM training. Detects hardware, selects framework, creates data splits, and optimizes through structured phases. Use when asked to "fine-tune a model", "train a LoRA", "optimize training", "run autotrain", or "start fine-tuning".
+description: Set up and run an autonomous model training loop. Runs on HF Jobs (cloud GPUs) by default or locally. Supports any training paradigm: SFT, DPO, GRPO, RL, pretraining, VLM fine-tuning, reward modeling. Use when asked to "train a model", "fine-tune", "run RL training", "pretrain", or "start autotrain".
 ---
 
 # Autotrain
 
-Autonomous fine-tuning loop for LLM training: detect hardware, pick framework, curate data, train LoRA adapters, and optimize through structured experiment phases.
+Autonomous training loop: gather requirements, prepare data or environments, train models, and optimize through structured experiment phases — running on **HF Jobs** (cloud GPUs, default) or locally on Apple Silicon / NVIDIA.
 
 ## Tools
 
@@ -19,17 +19,20 @@ Follow these steps **in order**. Do not skip steps.
 
 ### Step 0: Python Environment
 
-If no virtual environment is active, create one with `uv venv && source .venv/bin/activate` before installing any packages.
+**Local mode only.** If no virtual environment is active, create one with `uv venv && source .venv/bin/activate` before installing any packages.
+
+**HF Jobs mode:** Skip this step — dependencies are declared inline in the training script (PEP 723) or via `--with` flags. The remote container handles its own environment.
 
 ### Step 1: Gather Requirements & Recon
 
 Ask (or infer from context):
-- **Goal** — what capability are we training? (e.g., "code completion", "medical QA", "sentiment classification")
-- **Base model** — name, size, quantization (e.g., `Qwen/Qwen2.5-3B`)
-- **Dataset** — source, format, size, any filtering criteria
-- **Metric** — primary metric + direction (e.g., `exact_accuracy` higher is better)
-- **Hardware** — will be auto-detected, but ask if ambiguous
-- **Constraints** — max training time, VRAM limits, must-not-touch files
+- **Training paradigm** — SFT / DPO / GRPO / RL / pretraining / VLM fine-tuning / reward modeling / other
+- **Goal** — what capability are we training? (e.g., "code completion", "medical QA", "play Doom", "reward model for RLHF")
+- **Model** — name, size, type (e.g., `Qwen/Qwen2.5-3B`, a policy network, or training from scratch)
+- **Dataset or environment** — source, format, size, any filtering criteria. RL/games may use an environment instead of a static dataset.
+- **Metric** — primary metric + direction (e.g., `exact_accuracy` higher is better, `episode_reward` higher is better)
+- **Execution mode** — **HF Jobs** (default, recommended) or **local**. HF Jobs gives access to A100/H200 GPUs billed per-second, no local GPU required. Local is fine for Apple Silicon or if the user has a local NVIDIA GPU and prefers not to use cloud.
+- **Constraints** — max training time, budget limits, must-not-touch files
 
 **Immediately inspect the model and dataset on the Hub:**
 
@@ -43,7 +46,7 @@ hf auth whoami
 # text-only model (pipeline_tag "text-generation") to avoid wasting parameters.
 hf models info <model_id>
 
-# If user is unsure about the base model, search for candidates
+# If user is unsure about the model, search for candidates
 hf models ls --search "qwen 3b" --sort downloads --limit 10
 hf models ls --search "llama" --filter text-generation --sort downloads
 hf models ls --author meta-llama --sort downloads --format json
@@ -71,23 +74,31 @@ hf datasets sql "SELECT bucket, COUNT(*) AS n FROM (
 
 This recon informs data curation decisions in Phase 1 — do it **before** writing any code.
 
-### Step 2: Detect Hardware & Select Framework
+### Step 2: Select Execution Mode
 
+#### HF Jobs (default)
+
+Pick a hardware flavor based on model size. Use `hf jobs hardware` to see all options and current pricing.
+
+| Model size | Recommended flavor | VRAM | Cost/hr |
+|------------|-------------------|------|---------|
+| < 1B | `t4-small` | 16 GB | ~$0.40 |
+| 1–3B | `l4x1` | 24 GB | ~$0.80 |
+| 3–7B | `a10g-small` | 24 GB | ~$1.00 |
+| 7–13B | `a10g-large` or `a100-large` | 24–80 GB | $1.50–2.50 |
+| 13B+ | `a100-large` or `h200` | 80–141 GB | $2.50–5.00 |
+| Multi-GPU | `a100x4`, `h200x4`, etc. | 320+ GB | $10+ |
+
+Verify the user is logged in and has credits:
 ```bash
-# Auto-detection logic
-if [[ "$(uname -m)" == "arm64" ]] && [[ "$(uname)" == "Darwin" ]]; then
-  # Apple Silicon Mac → mlx-lm
-  FRAMEWORK="mlx-lm"
-elif nvidia-smi &>/dev/null; then
-  # NVIDIA GPU → unsloth (preferred) or TRL+PEFT (fallback)
-  FRAMEWORK="unsloth"
-else
-  echo "ERROR: No supported GPU detected. Need Apple Silicon or NVIDIA GPU."
-  exit 1
-fi
+hf auth whoami
 ```
 
-Record the detected hardware and framework in `autotrain.md` so resuming agents don't re-detect.
+Record the chosen flavor in `autotrain.md` so resuming agents reuse it. For HF Jobs specifics (script pattern, wrapper template, monitoring commands), see `references/hf-jobs.md`.
+
+#### Local (alternative)
+
+Auto-detect hardware and record it in `autotrain.md`. For hardware detection logic, framework-specific configs (mlx-lm, unsloth, TRL+PEFT), and gotchas, see `references/local.md`.
 
 ### Step 3: Create Branch
 
@@ -99,7 +110,9 @@ git checkout -b autotrain/<goal>-<date>
 
 Read any existing training scripts and evaluation code **deeply** before writing anything.
 
-**Download model and dataset if not already local:**
+**HF Jobs mode:** Model and dataset are loaded from the Hub **inside the remote job** at runtime (via `load_dataset()` / `from_pretrained()`). No need to download locally — but you still need to explore the data locally with SQL before writing code.
+
+**Local mode — download model and dataset:**
 ```bash
 # Download model weights (cached, re-downloads only if needed)
 hf download <model_id> --local-dir ./model
@@ -111,7 +124,7 @@ hf download <dataset_id> --repo-type dataset --local-dir ./data
 hf download <dataset_id> --repo-type dataset --include "*.parquet" --local-dir ./data
 ```
 
-**Explore data with SQL before writing split code:**
+**Explore data with SQL before writing code (both modes):**
 ```bash
 # Understand schema
 hf datasets sql "SELECT * FROM read_parquet('./data/train.parquet') LIMIT 1" --format json
@@ -130,9 +143,11 @@ FROM read_parquet('./data/train.parquet')"
 
 Understand the data format, tokenization, and evaluation pipeline before writing anything.
 
-### Step 5: Create Three-Way Data Split
+### Step 5: Define Evaluation Strategy
 
-**Mandatory.** Every session must have three splits:
+Choose the evaluation approach based on your training paradigm:
+
+**Dataset-based** (SFT, DPO, reward modeling): Classic three-way split.
 
 | Split | Purpose | Mutability |
 |-------|---------|------------|
@@ -140,11 +155,29 @@ Understand the data format, tokenization, and evaluation pipeline before writing
 | **val** | Checkpoint selection (in-loop) | May be re-curated between experiments |
 | **test** | Keep/discard decisions | **Fixed at session start. Never modify.** |
 
-Additionally, prepare a **fresh validation** mechanism: a way to sample a different validation subset to catch overfitting to the test set (see Validation Protocol below).
+**Rollout-based** (RL, games, robotics): Fixed evaluation environment/seed, held-out episode set. Define the eval protocol (number of episodes, seeds, success criteria) and keep it fixed.
 
-### Step 6: Write `autotrain.md` and `autotrain.sh`
+**Hybrid** (RLHF with reward model + environment): Both a held-out preference dataset and a fixed eval environment.
+
+Additionally, prepare a **fresh validation** mechanism: a way to sample a different validation subset (or run different eval episodes) to catch overfitting to the test set.
+
+**HF Jobs mode — upload splits to Hub:**
+```bash
+# Push splits to a private dataset on the Hub
+# The training script loads them with load_dataset("${HF_USER}/autotrain-<goal>-data")
+hf repos create ${HF_USER}/autotrain-<goal>-data --type dataset --exist-ok
+hf upload ${HF_USER}/autotrain-<goal>-data ./splits/ . --repo-type dataset \
+  --commit-message "Upload train/val/test splits"
+```
+
+### Step 6: Write `autotrain.md`, `autotrain.sh`, and training script
 
 See templates below. Invest time making `autotrain.md` excellent — it's the session's living memory.
+
+The agent writes the training code from scratch based on the paradigm. The skill does not prescribe what training code to write — only the structure around it. For execution-mode specifics, read the relevant reference file:
+- HF Jobs: `references/hf-jobs.md` (script pattern, wrapper, monitoring)
+- Local: `references/local.md` (framework configs, hardware gotchas)
+- Hub integration: `references/hf-integration.md` (uploads, model cards, CLI reference)
 
 ### Step 7: Commit Before Any Experiment
 
@@ -161,136 +194,6 @@ git commit -m "autotrain: initial session setup"
 
 ---
 
-## Hardware & Framework Reference
-
-### mlx-lm (Mac / Apple Silicon)
-
-**When to use:** `uname -m` returns `arm64` on macOS.
-
-**Training command:**
-```bash
-mlx_lm.lora \
-  --model <model_name_or_path> \
-  --data <data_dir> \
-  --train \
-  --batch-size 2 \
-  --grad-accumulation-steps 8 \
-  --lora-layers 16 \
-  --iters <steps> \
-  --learning-rate 1e-5 \
-  --adapter-path ./adapters
-```
-
-**GPU note:** Apple Silicon shares the GPU between training and display. Keep `--batch-size` ≤ 4 to avoid freezing the screen. Use `--grad-accumulation-steps` to maintain effective batch size.
-
-**Typical hyperparameter ranges:**
-| Param | Range | Notes |
-|-------|-------|-------|
-| `--batch-size` | 1–4 | **Default 2.** Larger batches can freeze macOS display (GPU starvation). Compensate with `--grad-accumulation-steps`. |
-| `--grad-accumulation-steps` | 2–16 | Effective batch = batch-size × steps. Default 8 (effective 16). |
-| `--lora-layers` | 8–32 | More layers = more capacity but slower |
-| `--iters` | 100–2000 | Start small, increase if undertrained |
-| `--learning-rate` | 1e-6 to 1e-4 | 1e-5 is a safe default |
-| `--lora-rank` | 8–64 | Default 8; increase for complex tasks |
-
-**Evaluation:**
-```bash
-mlx_lm.lora --model <model> --adapter-path ./adapters --data <data_dir> --test
-```
-
-**Export:** Adapter only (safetensors). Use `mlx_lm.fuse` to merge into base model.
-
-### unsloth (NVIDIA GPU — preferred)
-
-**When to use:** `nvidia-smi` succeeds. Preferred over plain TRL — 2-5x faster, 50-70% less VRAM.
-
-**Typical script structure:**
-```python
-from unsloth import FastLanguageModel
-
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="<model>",
-    max_seq_length=<length>,
-    load_in_4bit=True,
-)
-
-model = FastLanguageModel.get_peft_model(
-    model,
-    r=16,                    # LoRA rank
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                     "gate_proj", "up_proj", "down_proj"],
-    lora_alpha=16,
-    lora_dropout=0,          # MUST be 0 for unsloth fast kernels
-    bias="none",             # MUST be "none" for unsloth fast kernels
-)
-
-from trl import SFTTrainer
-from transformers import TrainingArguments
-
-trainer = SFTTrainer(
-    model=model,
-    train_dataset=train_dataset,
-    eval_dataset=val_dataset,
-    args=TrainingArguments(
-        per_device_train_batch_size=4,
-        num_train_epochs=1,
-        learning_rate=2e-4,
-        output_dir="./outputs",
-        eval_strategy="steps",
-        eval_steps=50,
-        logging_steps=10,
-    ),
-)
-trainer.train()
-```
-
-**Critical requirements for fast kernels:**
-- `lora_dropout=0` — non-zero disables fast path
-- `bias="none"` — non-none disables fast path
-
-**Export options:**
-- LoRA adapter only: `model.save_pretrained("lora_adapter")`
-- Merged 16-bit: `model.save_pretrained_merged("merged", tokenizer)`
-- GGUF: `model.save_pretrained_gguf("gguf", tokenizer, quantization_method="q4_k_m")` (30+ quant methods)
-
-### TRL + PEFT (NVIDIA GPU — fallback)
-
-**When to use:** When unsloth doesn't support the model architecture.
-
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from peft import LoraConfig
-from trl import SFTTrainer
-
-model = AutoModelForCausalLM.from_pretrained("<model>", torch_dtype="auto", device_map="auto")
-tokenizer = AutoTokenizer.from_pretrained("<model>")
-
-peft_config = LoraConfig(
-    r=16,
-    lora_alpha=32,
-    target_modules=["q_proj", "v_proj"],
-    lora_dropout=0.05,
-    bias="none",
-    task_type="CAUSAL_LM",
-)
-
-trainer = SFTTrainer(
-    model=model,
-    train_dataset=train_dataset,
-    eval_dataset=val_dataset,
-    peft_config=peft_config,
-    args=TrainingArguments(
-        per_device_train_batch_size=4,
-        num_train_epochs=1,
-        learning_rate=2e-4,
-        output_dir="./outputs",
-    ),
-)
-trainer.train()
-```
-
----
-
 ## `autotrain.md` Template
 
 This is the session's living memory. A fresh agent with no context should be able to read this file and continue effectively.
@@ -301,27 +204,39 @@ This is the session's living memory. A fresh agent with no context should be abl
 ## Objective
 <What capability are we training? What does success look like?>
 
-## Hardware & Framework
-- **Hardware**: <e.g., Apple M2 Max 64GB / NVIDIA RTX 4090 24GB>
-- **Framework**: <mlx-lm / unsloth / TRL+PEFT>
-- **Detection**: <how it was detected, so resuming agents don't re-detect>
+## Training Paradigm
+<SFT / DPO / GRPO / RL / pretraining / VLM / reward modeling / other>
 
-## Base Model
-- **Name**: <e.g., Qwen/Qwen2.5-3B>
+## Execution Mode
+- **Mode**: <HF Jobs / local>
+- **Hardware**: <e.g., HF Jobs a10g-small / Apple M2 Max 64GB / NVIDIA RTX 4090 24GB>
+- **HF Jobs flavor**: <flavor name, if using Jobs>
+
+## Model
+- **Name**: <e.g., Qwen/Qwen2.5-3B, or "from scratch">
+- **Type**: <pretrained LLM / policy network / reward model / etc.>
 - **Size**: <parameters>
-- **Quantization**: <4-bit / 16-bit / none>
+
+## Model Configuration
+<Paradigm-dependent. Examples:>
+<- SFT/DPO: LoRA rank/alpha, target modules, quantization>
+<- RL: policy architecture, value head config>
+<- VLM: which layers to unfreeze, vision encoder config>
+<- Pretraining: full model, no adapter>
+<- Reward modeling: reward head config>
 
 ## Metrics
 - **Primary**: <name> (<unit>, lower/higher is better)
 - **Secondary**: <name>, <name>, ...
-- **Track val_loss alongside accuracy** — divergence between them signals overfitting
+- **Track secondary metrics for overfitting signal** — divergence between train and eval metrics signals overfitting
 
-## Dataset Splits
-- **Source**: <dataset name/path>
-- **Train**: <N examples, filters applied>
-- **Val**: <N examples, filters applied>
-- **Test**: <N examples — FIXED at session start, never modified>
-- **Fresh validation**: <method for sampling different val subsets>
+## Evaluation Strategy
+- **Type**: <dataset-based / rollout-based / hybrid>
+- **Source**: <dataset name/path or environment description>
+- **Train**: <N examples / episodes, filters applied>
+- **Val**: <N examples / episodes, filters applied>
+- **Test**: <N examples / episodes — FIXED at session start, never modified>
+- **Fresh validation**: <method for sampling different val subsets or eval episodes>
 
 ## How to Run
 `./autotrain.sh` — outputs `METRIC name=number` lines.
@@ -339,16 +254,17 @@ This is the session's living memory. A fresh agent with no context should be abl
 Follow this order. Do NOT jump to Phase 4 before exhausting Phases 1-2.
 
 1. **Phase 1: Data Quality** — volume, curation, filtering, dedup (HIGHEST leverage)
-2. **Phase 2: Prompt & Output Format** — instruction template, chat format, target length
-3. **Phase 3: LoRA Architecture** — rank, target_modules, alpha
+2. **Phase 2: Input & Output Format** — instruction template, chat format, reward signal design
+3. **Phase 3: Model & Architecture Config** — LoRA rank, reward head, policy arch, layer unfreezing
 4. **Phase 4: Training Hyperparameters** — LR, steps, batch size, scheduler
-5. **Phase 5: Regularization** — only if overfitting is visible (val_loss rising while train_loss falls)
+5. **Phase 5: Regularization** — only if overfitting is visible
 
 ## Anti-Thrash Rules
 1. 5+ consecutive discards → stop, write notes, pivot to a different phase
 2. Same metric +/-noise for 8+ experiments → change something structural
 3. All current ideas are Phase 4 but Phase 1-3 not exhausted → go back up
 4. 20+ min without improvement → run fresh validation, accept or fundamentally pivot
+5. Track secondary metrics for overfitting signal — if eval metrics diverge from train metrics, stop and investigate
 
 ## What's Been Tried
 
@@ -368,6 +284,12 @@ Update `autotrain.md` after every `keep` — especially the "What's Been Tried" 
 
 ## `autotrain.sh` Template
 
+### HF Jobs mode
+
+See `references/hf-jobs.md` for the full wrapper pattern. The wrapper submits `train.py` via `hf jobs uv run` with env vars for config.
+
+### Local mode
+
 ```bash
 #!/bin/bash
 set -euo pipefail
@@ -376,15 +298,15 @@ set -euo pipefail
 python -m compileall -q src/ || { echo "Syntax error"; exit 1; }
 
 # Training
-# <framework-specific training command here>
+# <agent writes training command based on paradigm and framework>
 
-# Evaluation on TEST split (fixed holdout)
+# Evaluation on TEST split / eval environment (fixed holdout)
 # <evaluation command here>
 
 # Output metrics — one METRIC line per metric
 # METRIC accuracy=0.847
 # METRIC val_loss=1.234
-# METRIC f1=0.812
+# METRIC episode_reward=312.5
 ```
 
 **Timeout guidance:** Set `timeout_seconds` in `run_experiment` to `training_time * 1.5`. If a typical run takes 5 minutes, set timeout to 450 seconds.
@@ -417,6 +339,8 @@ Data changes almost always have more impact than hyperparameter changes. Explore
 - **Balancing**: Ensure good distribution across difficulty levels
 - **Cleaning**: Fix formatting issues, remove corrupted examples
 
+For RL/games: environment design, reward shaping, curriculum ordering.
+
 **Use `hf datasets sql` to inform curation decisions:**
 ```bash
 # Distribution analysis — find the best filter thresholds
@@ -437,37 +361,40 @@ hf datasets sql "SELECT * FROM read_parquet('./data/train.parquet')
 WHERE quality_score > 0.8 LIMIT 5" --format json
 ```
 
-### Phase 2: Prompt & Output Format
+### Phase 2: Input & Output Format
 
 How you format the input/output matters enormously:
 - **Instruction template**: System prompt, few-shot examples
 - **Chat template**: Match the base model's expected format exactly
-- **Target format**: JSON vs plain text, structured vs free-form, etc.
+- **Target format**: JSON vs plain text, structured vs free-form
 - **Target length**: Shorter outputs are easier to learn (if they retain information)
 - **Special tokens**: Proper use of BOS/EOS/pad tokens
+- **Reward signal design** (RL/DPO/GRPO): reward function, preference format, KL penalty weight
 
-### Phase 3: LoRA Architecture
+### Phase 3: Model & Architecture Config
 
-- **Rank** (`r`): 8 → 16 → 32 → 64. Higher = more capacity but diminishing returns.
-- **Target modules**: Start with attention (`q_proj`, `v_proj`), expand to all linear layers
-- **Alpha**: Usually `alpha = rank` or `alpha = 2 * rank`
-- **Layers**: More LoRA layers vs fewer (framework-dependent)
+Structural model decisions — same position in the sequence, scope depends on paradigm:
+- **SFT/DPO**: LoRA rank (`r`: 8 → 16 → 32 → 64), target modules, alpha, layers
+- **Reward modeling**: Reward head architecture, pooling strategy
+- **RL**: Policy network architecture, value head config, shared vs separate networks
+- **VLM**: Which layers to unfreeze, vision encoder config, projection layer
+- **Pretraining**: Model size, architecture choices (usually fixed — skip this phase)
 
 ### Phase 4: Training Hyperparameters
 
 Only tune these after Phases 1-3 are reasonably explored:
 - **Learning rate**: Most impactful HP. Sweep 1e-6 to 1e-3 in log scale.
-- **Steps/epochs**: Watch val_loss to find the sweet spot before overfitting.
+- **Steps/epochs**: Watch eval metrics to find the sweet spot before overfitting.
 - **Batch size**: Larger = smoother gradients but fewer updates per epoch.
 - **Scheduler**: Cosine, linear decay, constant with warmup.
 - **Warmup**: 5-10% of total steps.
 
 ### Phase 5: Regularization
 
-Only if overfitting is visible (val_loss rising while train_loss falling):
-- **Weight decay**: 0.01–0.1
-- **Dropout**: Only for TRL+PEFT (unsloth requires `lora_dropout=0`)
-- **Early stopping**: Monitor val_loss, stop when it starts rising
+Only if overfitting is visible (eval metrics diverging from train metrics):
+- **Weight decay**: 0.01-0.1
+- **Dropout**: Where supported by the framework
+- **Early stopping**: Monitor eval metrics, stop when they start degrading
 - **Data augmentation**: If applicable to the task
 
 **RULE: Do NOT jump to Phase 4 before exhausting Phases 1-2.** Data and format changes are almost always higher leverage than hyperparameter tuning.
@@ -476,7 +403,7 @@ Only if overfitting is visible (val_loss rising while train_loss falling):
 
 ## Validation Protocol
 
-### Three-Way Split (Mandatory)
+### Three-Way Split (dataset-based, mandatory for SFT/DPO/RM)
 
 | Split | Used For | When |
 |-------|----------|------|
@@ -486,22 +413,27 @@ Only if overfitting is visible (val_loss rising while train_loss falling):
 
 The test split is **sacred**. Never modify it, never train on it, never use it for checkpoint selection.
 
+### Rollout-Based Evaluation (RL/games/robotics)
+
+Fixed evaluation protocol: same seeds, same environment config, same number of episodes. The eval environment is sacred — never change it mid-session.
+
 ### Fresh Validation
 
-**Every 10 experiments OR after every `keep`:** evaluate on a DIFFERENT random sample from the validation pool (not the fixed test set). This catches overfitting to the test set.
+**Every 10 experiments OR after every `keep`:** evaluate on a DIFFERENT random sample from the validation pool (or run different eval episodes). This catches overfitting to the test set.
 
 How to implement:
 - Keep a larger validation pool and sample from it
 - Or use k-fold style rotation
-- Compare fresh validation accuracy to test accuracy — large divergence means the test set is being overfit
+- For RL: vary eval seeds while keeping the environment fixed
+- Compare fresh validation results to test results — large divergence means the test set is being overfit
 
 ### Minimum Test Set Size Guidance
 
 | Size | Reliability | Recommendation |
 |------|-------------|----------------|
-| <200 examples | Noisy | Treat ±3% changes as ties |
-| 200–1000 | Reasonable | Can trust ±1.5% changes |
-| >1000 | Good | Can trust ±1% changes |
+| <200 examples | Noisy | Treat +/-3% changes as ties |
+| 200-1000 | Reasonable | Can trust +/-1.5% changes |
+| >1000 | Good | Can trust +/-1% changes |
 
 When the test set is small, require larger improvements before calling a `keep`.
 
@@ -512,10 +444,10 @@ When the test set is small, require larger improvements before calling a `keep`.
 These rules prevent wasted compute from unproductive experiment cycles:
 
 1. **5+ consecutive discards** → Stop. Write detailed notes about what you've tried. Pivot to a different phase entirely.
-2. **Same metric ±noise for 8+ experiments** → The current approach is exhausted. Change something structural (different phase, different data strategy, different architecture).
+2. **Same metric +/-noise for 8+ experiments** → The current approach is exhausted. Change something structural (different phase, different data strategy, different architecture).
 3. **All current ideas are Phase 4 but Phases 1-3 not exhausted** → Go back up. You're micro-optimizing when macro changes are still available.
 4. **20+ minutes without improvement** → Run fresh validation to check if recent "improvements" were noise. Either accept current state or make a fundamental pivot.
-5. **Track val_loss alongside accuracy** → If val_loss is rising while accuracy improves, you're overfitting. Stop and investigate.
+5. **Track secondary metrics for overfitting signal** → If eval metrics diverge from train metrics (e.g., val_loss rising while accuracy improves, episode reward variance increasing), you're overfitting. Stop and investigate.
 
 ---
 
@@ -533,74 +465,9 @@ These rules prevent wasted compute from unproductive experiment cycles:
 
 ---
 
-## HF Integration (Full Auto)
+## HF Integration
 
-**IMPORTANT:** Use `hf` (not deprecated `huggingface-cli`). Run `hf auth whoami` at setup to get username.
-
-### Session Setup (once, during Step 1)
-
-```bash
-# Get username for repo paths
-HF_USER=$(hf auth whoami 2>/dev/null | head -1)
-
-# Create the adapter repo on the Hub (idempotent with --exist-ok)
-hf repos create ${HF_USER}/<model>-lora --exist-ok
-
-# Optionally create a bucket for session logs
-hf buckets create ${HF_USER}/autotrain-<goal>
-```
-
-### After Every `keep`
-
-1. Update `autotrain.md` and commit (see Doc Update Discipline)
-2. Upload adapter to Hub:
-   ```bash
-   hf upload ${HF_USER}/<model>-lora ./adapters/ . \
-     --commit-message "Exp #N: <description>" \
-     --commit-description "Primary: <metric>=<value>"
-   ```
-3. Sync session doc to the model repo:
-   ```bash
-   hf upload ${HF_USER}/<model>-lora ./autotrain.md autotrain.md \
-     --commit-message "doc: session notes after exp #N"
-   ```
-4. Sync session files to bucket (full history):
-   ```bash
-   hf buckets sync . hf://buckets/${HF_USER}/autotrain-<goal>/ \
-     --include "autotrain.*" --include "autotrain.jsonl"
-   ```
-
-### On First `keep` (or when user asks)
-
-Create a model card (`README.md` in the adapter directory) with:
-- Training configuration (base model, framework, LoRA config)
-- Results table (experiment history, best metrics)
-- Usage example (how to load and use the adapter)
-- Dataset description
-- Link to base model: `hf models info <base_model>` for metadata
-
-Upload it:
-```bash
-hf upload ${HF_USER}/<model>-lora ./adapters/README.md README.md \
-  --commit-message "Add model card"
-```
-
-### On Session End
-
-1. Final upload of adapter + model card with updated results:
-   ```bash
-   hf upload ${HF_USER}/<model>-lora ./adapters/ . \
-     --commit-message "Final: <primary_metric>=<best_value> after N experiments"
-   ```
-2. Final bucket sync:
-   ```bash
-   hf buckets sync . hf://buckets/${HF_USER}/autotrain-<goal>/ \
-     --include "autotrain.*" --include "autotrain.jsonl" --include "*.log"
-   ```
-3. Tag the final version:
-   ```bash
-   hf repos tag ${HF_USER}/<model>-lora final --revision main
-   ```
+For full HF Hub integration details (session setup, uploads after every `keep`, model cards, session end, CLI reference), see `references/hf-integration.md`.
 
 ---
 
@@ -612,42 +479,15 @@ hf upload ${HF_USER}/<model>-lora ./adapters/README.md README.md \
 - **Follow the phase order.** Data quality first, hyperparameters later. See Experiment Priority Order.
 - **Simpler is better.** Removing complexity for equal performance = keep.
 - **Don't thrash.** See Anti-Thrash Rules. Monitor your own pattern of results.
-- **Track val_loss.** Always include val_loss as a secondary metric. Divergence from accuracy = overfitting.
+- **Track secondary metrics.** Always include secondary metrics (val_loss, episode reward variance, eval-train gap). Divergence = overfitting.
 - **Crashes:** fix if trivial, otherwise log and move on.
 - **Think longer when stuck.** Re-read the data, study the model's errors, reason about what the model is actually learning. The best ideas come from understanding failure modes.
 - **Doc discipline.** Update and commit `autotrain.md` after every keep and every 10 experiments.
 - **Fresh validation.** Every 10 experiments or after every keep, run a fresh validation check.
+- **HF integration.** After every `keep`, upload model output and sync session docs. See `references/hf-integration.md`.
 - **Resuming:** if `autotrain.md` exists, read it + git log, continue looping.
 
 **NEVER STOP.** The user may be away for hours. Keep going until interrupted.
-
-## HF CLI Quick Reference
-
-The `hf` command (not deprecated `huggingface-cli`) is available. Key commands for fine-tuning:
-
-| Command | Use Case |
-|---------|----------|
-| `hf auth whoami` | Get logged-in username for repo paths |
-| `hf models info MODEL_ID` | Inspect base model (arch, size, config, tags) |
-| `hf models ls --search "qwen" --sort downloads` | Search for candidate base models |
-| `hf models ls --author ORG --filter TAG` | Filter models by org and task tag |
-| `hf datasets info DATASET_ID` | Inspect dataset (size, schema, splits) |
-| `hf datasets ls --search "your topic" --sort downloads` | Search for training datasets |
-| `hf datasets parquet DATASET_ID` | Get parquet URLs for SQL queries |
-| `hf datasets sql "SQL"` | Query datasets with DuckDB (explore, filter, profile) |
-| `hf download REPO_ID --local-dir ./path` | Download model or dataset |
-| `hf download REPO_ID --repo-type dataset` | Download a dataset specifically |
-| `hf repos create REPO_ID --exist-ok` | Create adapter repo on Hub |
-| `hf upload REPO_ID LOCAL_PATH PATH_IN_REPO` | Upload adapter/files to Hub |
-| `hf buckets create BUCKET_ID` | Create a bucket for session logs |
-| `hf buckets sync ./local hf://buckets/USER/BUCKET/` | Sync files to bucket |
-| `hf repos tag REPO_ID TAG_NAME` | Tag a version (e.g., "final", "best") |
-
-**Tips:**
-- Use `--format json` on list/info commands for machine-readable output
-- Use `-q` / `--quiet` to suppress progress bars in scripts
-- Use `--include` / `--exclude` glob patterns to filter uploads/downloads
-- Run `hf <command> --help` for full options
 
 ## Ideas Backlog
 
