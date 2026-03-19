@@ -1,6 +1,6 @@
 ---
 name: autotrain-create
-description: Set up and run an autonomous model training loop on HF Jobs (cloud GPUs). Supports any training paradigm: SFT, DPO, GRPO, RL, pretraining, VLM fine-tuning, reward modeling, distillation. Use when asked to "train a model", "fine-tune", "run RL training", "pretrain", "distill", or "start autotrain".
+description: "Set up and run an autonomous model training loop on HF Jobs (cloud GPUs). Supports any training paradigm: SFT, DPO, GRPO, RL, pretraining, VLM fine-tuning, reward modeling, distillation. Use when asked to train a model, fine-tune, run RL training, pretrain, distill, or start autotrain."
 ---
 
 # Autotrain
@@ -9,16 +9,11 @@ Autonomous training loop: gather requirements, prepare data or environments, tra
 
 ## Tools
 
-### Async (HF Jobs — recommended)
 - **`init_experiment`** — configure session (name, metric, unit, direction, optional `benchmark` for frozen eval contract). Call again to re-initialize.
-- **`submit_job`** — submits a detached HF Job. Returns immediately with job_id and experiment_id. Default stage: `smoke` (10-step validation). Use `stage="full"` after smoke passes.
-- **`check_jobs`** — polls all active jobs (or one by job_id). Returns status, elapsed, metrics (if completed), tail output.
-- **`cancel_job`** — cancels a running job. Refuses to cancel smoke under 120s.
-- **`log_decision`** — records keep/discard/crash/smoke_failed. Like `log_experiment` but also checks `benchmark.json` integrity on keep.
-
-### Utility
-- **`run_experiment`** — runs a command synchronously. Only for quick local utility tasks (data prep, evaluation scripts). **NOT for training.**
-- **`log_experiment`** — records a local utility run result. For HF Jobs training, use `log_decision` instead.
+- **`run_experiment`** — submit a detached HF Job. Returns immediately with job_id and experiment_id. Default stage: `smoke` (10-step validation). Use `stage="full"` after smoke passes.
+- **`check_jobs`** — poll active jobs for status, elapsed time, metrics, and tail output.
+- **`cancel_job`** — cancel a running job. Refuses to cancel smoke under 120s.
+- **`log_experiment`** — record experiment decision (keep/discard/crash/smoke_failed). Checks `benchmark.json` integrity on keep.
 
 ## Setup
 
@@ -212,16 +207,16 @@ git commit -m "autotrain: initial session setup"
 **HF Jobs (async, pipelined):**
 ```
 init_experiment (with benchmark if applicable)
-→ submit_job(smoke, experiment A)
+→ run_experiment(smoke, experiment A)
 → while smoke runs: plan experiment B, write plan to autotrain.ideas.md
 → check_jobs → smoke A passed
-→ submit_job(full, experiment_id=A)
-→ submit_job(smoke, experiment B)     ← pipeline: smoke B while full A trains
+→ run_experiment(full, experiment_id=A)
+→ run_experiment(smoke, experiment B)     ← pipeline: smoke B while full A trains
 → while both run: 1-2 planning steps, then check_jobs, repeat
 → check_jobs → full A completed
-→ log_decision(A)
+→ log_experiment(A)
 → check_jobs → smoke B completed
-→ submit_job(full, experiment_id=B)
+→ run_experiment(full, experiment_id=B)
 → loop
 ```
 
@@ -336,11 +331,10 @@ See `references/hf-jobs.md` for the full wrapper pattern. The wrapper submits `t
 Bash script for backpressure/correctness checks. **Only create when the user's constraints require correctness validation.**
 
 When this file exists:
-- Runs automatically after every **passing** benchmark in `run_experiment`.
-- If checks fail, `run_experiment` reports it — log as `checks_failed`.
+- Run it manually via bash after `check_jobs` reports a completed job.
+- If checks fail, log as `checks_failed` in `log_experiment`.
 - Its execution time does **NOT** affect the primary metric.
 - You cannot `keep` a result when checks have failed.
-- Has a separate timeout (default 300s, configurable via `checks_timeout_seconds`).
 
 ---
 
@@ -510,7 +504,7 @@ For full HF Hub integration details (session setup, uploads after every `keep`, 
 - **HF integration.** After every `keep`, upload model output and sync session docs. See `references/hf-integration.md`.
 - **Resuming:** if `autotrain.md` exists, read it + git log, continue looping.
 - **Polling cadence:** Call `check_jobs` after every 2-3 other tool calls. If no planning work remains, call `check_jobs` directly. Do not busy-loop — always do at least one productive action between polls.
-- **No file edits during active full runs:** Do not modify training scripts while a full job is active. Make all code changes before `submit_job`. While jobs run, only update `autotrain.md`, `autotrain.ideas.md`, and do analysis.
+- **No file edits during active full runs:** Do not modify training scripts while a full job is active. Make all code changes before `run_experiment`. While jobs run, only update `autotrain.md`, `autotrain.ideas.md`, and do analysis.
 - **Within-phase parallelism only:** You may pipeline multiple experiments from the same phase. Do not submit Phase N+1 experiments until at least one Phase N full run has completed.
 - **Externalize plans before polling:** Before calling `check_jobs`, write your current experiment plan to `autotrain.ideas.md`. This survives context resets.
 - **Smoke failures count toward anti-thrash:** 5+ consecutive failures (smoke_failed or discard) → pivot phase.
@@ -525,4 +519,4 @@ On resume (context limit, crash), check `autotrain.ideas.md` — prune stale/tri
 
 ## User Messages During Experiments
 
-If the user sends a message while an experiment is running, finish the current `run_experiment` + `log_experiment` cycle first, then incorporate their feedback in the next iteration. Don't abandon a running experiment.
+If the user sends a message while an experiment is running, finish the current `check_jobs` + `log_experiment` cycle first, then incorporate their feedback in the next iteration. Don't abandon a running experiment.

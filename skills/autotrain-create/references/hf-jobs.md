@@ -68,7 +68,7 @@ Add paradigm-specific dependencies to the PEP 723 header (e.g., `trl`, `peft`, `
 
 ## `autotrain.sh` Jobs Wrapper
 
-The script **must exit in seconds**. It submits the job in detached mode and prints the job ID. `submit_job` parses the ID and returns immediately. Polling happens via `check_jobs`, not in the script.
+The script **must exit in seconds**. It submits the job in detached mode and prints the job ID. `run_experiment` parses the ID and returns immediately. Polling happens via `check_jobs`, not in the script.
 
 ```bash
 #!/bin/bash
@@ -98,7 +98,7 @@ if [ -z "$JOB_ID" ]; then
     exit 1
 fi
 
-# Print job ID for submit_job to parse — then EXIT immediately
+# Print job ID for run_experiment to parse — then EXIT immediately
 echo "$JOB_ID"
 ```
 
@@ -107,7 +107,7 @@ echo "$JOB_ID"
 ## Key Rules
 
 - ALWAYS use detached mode (`-d`) — attached mode drops on long jobs
-- The script must **exit in seconds** — `submit_job` blocks until it does
+- The script must **exit in seconds** — `run_experiment` blocks until it does
 - Use `bf16=True` on Ampere GPUs (A10G, A100, L40S), `fp16=True` only on T4
 - Declare all dependencies in PEP 723 header (`# /// script` / `# dependencies = [...]` / `# ///`)
 - Push results to Hub before exiting — the container is ephemeral
@@ -118,7 +118,7 @@ echo "$JOB_ID"
 
 ## Timeout Guidance
 
-Set `--timeout` in the script to `training_time * 1.5`. Set `timeout_seconds` in `submit_job` to 120s (script exits in seconds — this is just for safety).
+Set `--timeout` in the script to `training_time * 1.5`. Set `timeout_seconds` in `run_experiment` to 120s (script exits in seconds — this is just for safety).
 
 ## Monitoring
 

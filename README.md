@@ -28,12 +28,10 @@ Supports any training paradigm: SFT, DPO, GRPO, RL, pretraining, VLM fine-tuning
 | Tool | Description |
 |------|-------------|
 | `init_experiment` | One-time session config — name, metric, unit, direction, optional benchmark contract |
-| `submit_job` | Submit a detached HF Job. Returns immediately with job ID. Default stage: `smoke` (10-step validation). Use `stage='full'` after smoke passes |
+| `run_experiment` | Submit a detached HF Job. Returns immediately with job ID. Default stage: `smoke` (10-step validation). Use `stage='full'` after smoke passes |
 | `check_jobs` | Poll active jobs for status, elapsed time, metrics, and tail output |
 | `cancel_job` | Cancel a running HF Job. Refuses to cancel smoke jobs under 120 seconds |
-| `log_decision` | Record experiment decision (keep/discard/crash/smoke\_failed). Checks `benchmark.json` integrity on keep |
-| `run_experiment` | Synchronous command runner for local utility tasks (data prep, eval scripts). NOT for training |
-| `log_experiment` | Record a local utility run result |
+| `log_experiment` | Record experiment decision (keep/discard/crash/smoke\_failed). Checks `benchmark.json` integrity on keep |
 
 ### Supported paradigms
 
@@ -121,8 +119,8 @@ The agent asks about your goal, training paradigm, model, dataset/environment, a
 Training is fully asynchronous. The agent pipelines smoke tests and full runs to maximize GPU utilization:
 
 ```
-submit_job(smoke A) → plan B while A runs → check_jobs → smoke passed →
-submit_job(full A) + submit_job(smoke B) → check_jobs → log_decision
+run_experiment(smoke A) → plan B while A runs → check_jobs → smoke passed →
+run_experiment(full A) + run_experiment(smoke B) → check_jobs → log_experiment
 ```
 
 The agent uses wait time productively — planning the next experiment, curating data, or reviewing results while jobs run on HF infrastructure.
@@ -216,8 +214,8 @@ The **extension** is domain-agnostic infrastructure. The **skill** encodes train
 ┌───────────────────────────┐     ┌────────────────────────────────┐
 │  Extension (global)       │     │  Skill (training domain)       │
 │                           │     │                                │
-│  submit_job / check_jobs  │◄────│  phases: data > format > arch  │
-│  log_decision             │     │  evaluation: splits / rollouts │
+│  run_experiment / check   │◄────│  phases: data > format > arch  │
+│  log_experiment           │     │  evaluation: splits / rollouts │
 │  widget + dashboard       │     │  anti-thrash: self-monitoring  │
 │                           │     │  HF Jobs + HF Hub integration  │
 └───────────────────────────┘     └────────────────────────────────┘
@@ -247,7 +245,7 @@ When a smoke test passes, the extension hashes the training script. If the scrip
 
 ### Benchmark freeze
 
-`benchmark.json` is committed once during `init_experiment` and never modified. Both `submit_job` and `log_decision` refuse to proceed if `benchmark.json` has uncommitted changes — preventing accidental evaluation drift.
+`benchmark.json` is committed once during `init_experiment` and never modified. Both `run_experiment` and `log_experiment` refuse to proceed if `benchmark.json` has uncommitted changes — preventing accidental evaluation drift.
 
 ### 3-strike circuit breaker
 

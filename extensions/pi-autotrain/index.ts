@@ -5,11 +5,10 @@
  * Domain-specific behavior comes from skills (what command to run, what to optimize).
  *
  * Provides:
- * - `submit_job` tool — submits detached HF Job, returns immediately with job ID
+ * - `run_experiment` tool — submits detached HF Job, returns immediately with job ID
  * - `check_jobs` tool — polls active jobs for status and metrics
  * - `cancel_job` tool — cancels a running job with minimum runtime guard
- * - `log_decision` tool — records keep/discard with benchmark integrity check
- * - `run_experiment` tool — synchronous local runner (utility only, NOT for training)
+ * - `log_experiment` tool — records keep/discard with benchmark integrity check
  * - Status widget showing experiment count + best metric + active jobs
  * - Ctrl+Y toggle to expand/collapse full dashboard inline above the editor
  * - Injects autotrain.md into context on every turn via before_agent_start
@@ -20,7 +19,6 @@ import type {
   ExtensionContext,
   Theme,
 } from "@mariozechner/pi-coding-agent";
-import { truncateTail } from "@mariozechner/pi-coding-agent";
 import { StringEnum } from "@mariozechner/pi-ai";
 import {
   Text,
@@ -68,21 +66,6 @@ interface ExperimentState {
   currentSegment: number;
 }
 
-interface RunDetails {
-  command: string;
-  exitCode: number | null;
-  durationSeconds: number;
-  passed: boolean;
-  crashed: boolean;
-  timedOut: boolean;
-  tailOutput: string;
-  /** null = checks not run (no file or benchmark failed), true/false = ran */
-  checksPass: boolean | null;
-  checksTimedOut: boolean;
-  checksOutput: string;
-  checksDuration: number;
-}
-
 interface LogDetails {
   experiment: ExperimentResult;
   state: ExperimentState;
@@ -91,24 +74,6 @@ interface LogDetails {
 // ---------------------------------------------------------------------------
 // Tool Schemas
 // ---------------------------------------------------------------------------
-
-const RunParams = Type.Object({
-  command: Type.String({
-    description:
-      "Shell command to run (e.g. 'pnpm test:vitest', 'uv run train.py')",
-  }),
-  timeout_seconds: Type.Optional(
-    Type.Number({
-      description: "Kill after this many seconds (default: 600)",
-    }),
-  ),
-  checks_timeout_seconds: Type.Optional(
-    Type.Number({
-      description:
-        "Kill autotrain.checks.sh after this many seconds (default: 300). Only relevant when the checks file exists.",
-    }),
-  ),
-});
 
 const InitParams = Type.Object({
   name: Type.String({
@@ -144,33 +109,9 @@ const InitParams = Type.Object({
   ),
 });
 
-const LogParams = Type.Object({
-  commit: Type.String({ description: "Git commit hash (short, 7 chars)" }),
-  metric: Type.Number({
-    description:
-      "The primary optimization metric value (e.g. seconds, val_bpb). 0 for crashes.",
-  }),
-  status: StringEnum(["keep", "discard", "crash", "checks_failed"] as const),
-  description: Type.String({
-    description: "Short description of what this experiment tried",
-  }),
-  metrics: Type.Optional(
-    Type.Record(Type.String(), Type.Number(), {
-      description:
-        'Additional metrics to track as { name: value } pairs, e.g. { "compile_µs": 4200, "render_µs": 9800 }. These are shown alongside the primary metric for tradeoff monitoring.',
-    }),
-  ),
-  force: Type.Optional(
-    Type.Boolean({
-      description:
-        "Set to true to allow adding a new secondary metric that wasn't tracked before. Only use for metrics that have proven very valuable to watch.",
-    }),
-  ),
-});
-
-const SubmitJobParams = Type.Object({
+const RunParams = Type.Object({
   command: Type.String({
-    description: "Shell command to submit (typically ./autotrain.sh)",
+    description: "Shell command to run (typically ./autotrain.sh)",
   }),
   experiment_id: Type.Optional(
     Type.Number({
@@ -753,15 +694,6 @@ export default function autotrainExtension(pi: ExtensionAPI) {
   let experimentsThisSession = 0; // reset on agent_start, incremented on log_experiment
   let autoResumeTurns = 0;
 
-  // Track last run's checks result so log_experiment can gate "keep" status
-  let lastRunChecks: {
-    pass: boolean;
-    output: string;
-    duration: number;
-  } | null = null;
-
-  // Running experiment state (for spinner in fullscreen overlay)
-  let runningExperiment: { startedAt: number; command: string } | null = null;
   let overlayTui: { requestRender: () => void } | null = null;
   let spinnerInterval: ReturnType<typeof setInterval> | null = null;
   let spinnerFrame = 0;
@@ -801,10 +733,6 @@ export default function autotrainExtension(pi: ExtensionAPI) {
   // -----------------------------------------------------------------------
 
   const reconstructState = async (ctx: ExtensionContext) => {
-    // Reset transient run state on session boundaries
-    lastRunChecks = null;
-    runningExperiment = null;
-
     state = {
       results: [],
       bestMetric: null,
@@ -1024,7 +952,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
         const width = process.stdout.columns || 120;
         const lines: string[] = [];
 
-        const hintText = " ctrl+y collapse • ctrl+shift+y fullscreen ";
+        const hintText = " ctrl+x collapse • ctrl+shift+x fullscreen ";
         const labelPrefix = "🔬 autotrain";
         const nameStr = state.name ? `: ${state.name}` : "";
         // 3 leading dashes + space + label + space + fill + hint
@@ -1147,7 +1075,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
         }
 
         parts.push(
-          theme.fg("dim", "  (ctrl+y expand • ctrl+shift+y fullscreen)"),
+          theme.fg("dim", "  (ctrl+x expand • ctrl+shift+x fullscreen)"),
         );
 
         return new Text(parts.join(""), 0, 0);
@@ -1165,10 +1093,8 @@ export default function autotrainExtension(pi: ExtensionAPI) {
     experimentsThisSession = 0;
   });
 
-  // Clear running experiment state when agent stops; check ideas file for continuation
+  // Check ideas file for continuation when agent stops
   pi.on("agent_end", async (_event, ctx) => {
-    runningExperiment = null;
-    if (overlayTui) overlayTui.requestRender();
 
     if (!autotrainMode) return;
 
@@ -1221,17 +1147,16 @@ export default function autotrainExtension(pi: ExtensionAPI) {
     let extra =
       "\n\n## Autotrain Mode (ACTIVE)" +
       "\nYou are in autotrain mode. Optimize the primary metric through an autonomous experiment loop." +
-      "\nUse init_experiment, submit_job, check_jobs, and log_decision tools. Use submit_job for ALL training — it submits to HF Jobs and returns immediately. Poll with check_jobs. NEVER STOP until interrupted." +
+      "\nUse init_experiment, run_experiment, check_jobs, and log_experiment tools. Use run_experiment for ALL training — it submits to HF Jobs and returns immediately. Poll with check_jobs. NEVER STOP until interrupted." +
       `\nExperiment rules: ${mdPath} — read this file at the start of every session and after compaction.` +
       "\nWrite promising but deferred optimizations as bullet points to autotrain.ideas.md — don't let good ideas get lost." +
-      `\n${BENCHMARK_GUARDRAIL}` +
-      "\nDo NOT use run_experiment for training. It is only for quick local utility commands (data prep, evaluation scripts). All training must go through submit_job → check_jobs → log_decision.";
+      `\n${BENCHMARK_GUARDRAIL}`;
 
     if (hasChecks) {
       extra +=
         "\n\n## Backpressure Checks (ACTIVE)" +
         `\n${checksPath} exists — run it manually after check_jobs reports a completed job.` +
-        "\nIf checks fail, use status 'checks_failed' in log_decision — it behaves like a crash (no commit, revert changes)." +
+        "\nIf checks fail, use status 'checks_failed' in log_experiment — it behaves like a crash (no commit, revert changes)." +
         "\nYou cannot use status 'keep' when checks have failed." +
         "\nThe checks execution time does NOT affect the primary metric.";
     }
@@ -1278,11 +1203,11 @@ export default function autotrainExtension(pi: ExtensionAPI) {
     name: "init_experiment",
     label: "Init Experiment",
     description:
-      "Initialize the experiment session. Call once before the first submit_job to set the name, primary metric, unit, and direction. Writes the config header to autotrain.jsonl.",
+      "Initialize the experiment session. Call once before the first run_experiment to set the name, primary metric, unit, and direction. Writes the config header to autotrain.jsonl.",
     promptSnippet:
       "Initialize experiment session (name, metric, unit, direction). Call once before first run.",
     promptGuidelines: [
-      "Call init_experiment exactly once at the start of an autotrain session, before the first submit_job.",
+      "Call init_experiment exactly once at the start of an autotrain session, before the first run_experiment.",
       "If autotrain.jsonl already exists with a config, do NOT call init_experiment again.",
       "If the optimization target changes (different benchmark, metric, or workload), call init_experiment again to insert a new config header and reset the baseline.",
     ],
@@ -1375,7 +1300,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
         content: [
           {
             type: "text",
-            text: `✅ Experiment initialized: "${state.name}"${reinitNote}\nMetric: ${state.metricName} (${state.metricUnit || "unitless"}, ${state.bestDirection} is better)\nConfig written to autotrain.jsonl. Now submit the baseline smoke with submit_job.${benchmarkNote}`,
+            text: `✅ Experiment initialized: "${state.name}"${reinitNote}\nMetric: ${state.metricName} (${state.metricUnit || "unitless"}, ${state.bestDirection} is better)\nConfig written to autotrain.jsonl. Now run the baseline smoke with run_experiment.${benchmarkNote}`,
           },
         ],
         details: { state: { ...state } },
@@ -1395,573 +1320,23 @@ export default function autotrainExtension(pi: ExtensionAPI) {
   });
 
   // -----------------------------------------------------------------------
-  // run_experiment tool
+  // run_experiment tool — async job submission
   // -----------------------------------------------------------------------
 
   pi.registerTool({
     name: "run_experiment",
     label: "Run Experiment",
     description:
-      "Synchronous local command runner. NOT for training — use submit_job instead. Only for quick local utility commands like data prep scripts or evaluation.",
-    promptSnippet:
-      "Run a local utility command (NOT for training — use submit_job)",
-    promptGuidelines: [
-      "Do NOT use run_experiment for training. Use submit_job for all HF Jobs training.",
-      "run_experiment is only for quick local utility commands like data prep, evaluation scripts, or file operations.",
-      "After run_experiment, call log_experiment to record the result. For HF Jobs training, use log_decision instead.",
-    ],
-    parameters: RunParams,
-
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const timeout = (params.timeout_seconds ?? 600) * 1000;
-
-      runningExperiment = { startedAt: Date.now(), command: params.command };
-      if (overlayTui) overlayTui.requestRender();
-
-      onUpdate?.({
-        content: [{ type: "text", text: `Running: ${params.command}` }],
-        details: { phase: "running" },
-      });
-
-      const t0 = Date.now();
-
-      let result;
-      try {
-        result = await pi.exec("bash", ["-c", params.command], {
-          signal,
-          timeout,
-          cwd: ctx.cwd,
-        });
-      } finally {
-        runningExperiment = null;
-        if (overlayTui) overlayTui.requestRender();
-      }
-
-      const durationSeconds = (Date.now() - t0) / 1000;
-      const output = (result.stdout + "\n" + result.stderr).trim();
-      const benchmarkPassed = result.code === 0 && !result.killed;
-
-      // Run backpressure checks if benchmark passed and checks file exists
-      let checksPass: boolean | null = null;
-      let checksTimedOut = false;
-      let checksOutput = "";
-      let checksDuration = 0;
-
-      const checksPath = path.join(ctx.cwd, "autotrain.checks.sh");
-      if (benchmarkPassed && fs.existsSync(checksPath)) {
-        const checksTimeout = (params.checks_timeout_seconds ?? 300) * 1000;
-        const ct0 = Date.now();
-        try {
-          const checksResult = await pi.exec("bash", [checksPath], {
-            signal,
-            timeout: checksTimeout,
-            cwd: ctx.cwd,
-          });
-          checksDuration = (Date.now() - ct0) / 1000;
-          checksTimedOut = !!checksResult.killed;
-          checksPass = checksResult.code === 0 && !checksResult.killed;
-          checksOutput = (
-            checksResult.stdout +
-            "\n" +
-            checksResult.stderr
-          ).trim();
-        } catch (e) {
-          checksDuration = (Date.now() - ct0) / 1000;
-          checksPass = false;
-          checksOutput = e instanceof Error ? e.message : String(e);
-        }
-      }
-
-      // Store checks result for log_experiment gate
-      lastRunChecks =
-        checksPass !== null
-          ? { pass: checksPass, output: checksOutput, duration: checksDuration }
-          : null;
-
-      // Overall pass: benchmark must pass AND checks must pass (if they ran)
-      const passed = benchmarkPassed && (checksPass === null || checksPass);
-
-      const details: RunDetails = {
-        command: params.command,
-        exitCode: result.code,
-        durationSeconds,
-        passed,
-        crashed: !passed,
-        timedOut: !!result.killed,
-        tailOutput: output.split("\n").slice(-80).join("\n"),
-        checksPass,
-        checksTimedOut,
-        checksOutput: checksOutput.split("\n").slice(-80).join("\n"),
-        checksDuration,
-      };
-
-      // Build LLM response
-      let text = "";
-      if (details.timedOut) {
-        text += `⏰ TIMEOUT after ${durationSeconds.toFixed(1)}s\n`;
-      } else if (!benchmarkPassed) {
-        text += `💥 FAILED (exit code ${result.code}) in ${durationSeconds.toFixed(1)}s\n`;
-      } else if (checksTimedOut) {
-        text += `✅ Benchmark PASSED in ${durationSeconds.toFixed(1)}s\n`;
-        text += `⏰ CHECKS TIMEOUT (autotrain.checks.sh) after ${checksDuration.toFixed(1)}s\n`;
-        text += `Log this as 'checks_failed' — the benchmark metric is valid but checks timed out.\n`;
-      } else if (checksPass === false) {
-        text += `✅ Benchmark PASSED in ${durationSeconds.toFixed(1)}s\n`;
-        text += `💥 CHECKS FAILED (autotrain.checks.sh) in ${checksDuration.toFixed(1)}s\n`;
-        text += `Log this as 'checks_failed' — the benchmark metric is valid but correctness checks did not pass.\n`;
-      } else {
-        text += `✅ PASSED in ${durationSeconds.toFixed(1)}s\n`;
-        if (checksPass === true) {
-          text += `✅ Checks passed in ${checksDuration.toFixed(1)}s\n`;
-        }
-      }
-
-      if (state.bestMetric !== null) {
-        text += `📊 Current best ${state.metricName}: ${formatNum(state.bestMetric, state.metricUnit)}\n`;
-      }
-
-      text += `\nLast 80 lines of output:\n${details.tailOutput}`;
-
-      if (checksPass === false) {
-        text += `\n\n── Checks output (last 80 lines) ──\n${details.checksOutput}`;
-      }
-
-      const truncation = truncateTail(text, {
-        maxLines: 150,
-        maxBytes: 40000,
-      });
-
-      return {
-        content: [{ type: "text", text: truncation.content }],
-        details,
-      };
-    },
-
-    renderCall(args, theme) {
-      let text = theme.fg("toolTitle", theme.bold("run_experiment "));
-      text += theme.fg("muted", args.command);
-      if (args.timeout_seconds) {
-        text += theme.fg("dim", ` (timeout: ${args.timeout_seconds}s)`);
-      }
-      return new Text(text, 0, 0);
-    },
-
-    renderResult(result, { expanded, isPartial }, theme) {
-      if (isPartial) {
-        return new Text(theme.fg("warning", "⏳ Running experiment..."), 0, 0);
-      }
-
-      const d = result.details as RunDetails | undefined;
-      if (!d) {
-        const t = result.content[0];
-        return new Text(t?.type === "text" ? t.text : "", 0, 0);
-      }
-
-      if (d.timedOut) {
-        let text = theme.fg(
-          "error",
-          `⏰ TIMEOUT ${d.durationSeconds.toFixed(1)}s`,
-        );
-        if (expanded) text += "\n" + theme.fg("dim", d.tailOutput.slice(-500));
-        return new Text(text, 0, 0);
-      }
-
-      if (d.checksTimedOut) {
-        // Benchmark passed but checks timed out
-        let text =
-          theme.fg("success", `✅ ${d.durationSeconds.toFixed(1)}s`) +
-          theme.fg(
-            "error",
-            ` ⏰ checks timeout ${d.checksDuration.toFixed(1)}s`,
-          );
-        if (expanded) {
-          text += "\n" + theme.fg("dim", d.checksOutput.slice(-500));
-        }
-        return new Text(text, 0, 0);
-      }
-
-      if (d.checksPass === false) {
-        // Benchmark passed but checks failed
-        let text =
-          theme.fg("success", `✅ ${d.durationSeconds.toFixed(1)}s`) +
-          theme.fg(
-            "error",
-            ` 💥 checks failed ${d.checksDuration.toFixed(1)}s`,
-          );
-        if (expanded) {
-          text += "\n" + theme.fg("dim", d.checksOutput.slice(-500));
-        }
-        return new Text(text, 0, 0);
-      }
-
-      if (d.crashed) {
-        let text = theme.fg(
-          "error",
-          `💥 FAIL exit=${d.exitCode} ${d.durationSeconds.toFixed(1)}s`,
-        );
-        if (expanded) text += "\n" + theme.fg("dim", d.tailOutput.slice(-500));
-        return new Text(text, 0, 0);
-      }
-
-      let text =
-        theme.fg("success", "✅ ") +
-        theme.fg("accent", `${d.durationSeconds.toFixed(1)}s`);
-
-      if (d.checksPass === true) {
-        text += theme.fg(
-          "success",
-          ` ✓ checks ${d.checksDuration.toFixed(1)}s`,
-        );
-      }
-
-      if (expanded) {
-        text += "\n" + theme.fg("dim", d.tailOutput.slice(-1000));
-      }
-
-      return new Text(text, 0, 0);
-    },
-  });
-
-  // -----------------------------------------------------------------------
-  // log_experiment tool
-  // -----------------------------------------------------------------------
-
-  pi.registerTool({
-    name: "log_experiment",
-    label: "Log Experiment",
-    description:
-      "Record a local utility run result. For HF Jobs training results, use log_decision instead.",
-    promptSnippet:
-      "Log local utility run result (use log_decision for HF Jobs training)",
-    promptGuidelines: [
-      "Use log_experiment only after run_experiment (local utility runs). For HF Jobs training, use log_decision instead.",
-      "log_experiment automatically runs git add -A && git commit with the description and a Result trailer. Do NOT commit manually before calling log_experiment.",
-      "Use status 'keep' if the PRIMARY metric improved. 'discard' if worse or unchanged. 'crash' if it failed. Secondary metrics are for monitoring — they almost never affect keep/discard. Only discard a primary improvement if a secondary metric degraded catastrophically, and explain why in the description.",
-      "If you discover complex but promising optimizations you won't pursue immediately, append them as bullet points to autotrain.ideas.md. Don't let good ideas get lost.",
-    ],
-    parameters: LogParams,
-
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const secondaryMetrics = params.metrics ?? {};
-
-      // Benchmark integrity check on keep
-      if (params.status === "keep") {
-        const benchmarkPath = path.join(ctx.cwd, "benchmark.json");
-        if (fs.existsSync(benchmarkPath)) {
-          try {
-            const diffResult = await pi.exec(
-              "git",
-              ["diff", "HEAD", "--", "benchmark.json"],
-              { cwd: ctx.cwd, timeout: 5000 },
-            );
-            const diffOutput = (diffResult.stdout || "").trim();
-            if (diffOutput) {
-              return {
-                content: [{
-                  type: "text",
-                  text: `❌ Cannot keep — benchmark.json has uncommitted changes.\n\nRevert with: git checkout -- benchmark.json\n\nDiff:\n${diffOutput.slice(0, 500)}`,
-                }],
-                details: {},
-              };
-            }
-          } catch {
-            // If git diff fails, proceed cautiously
-          }
-        }
-      }
-
-      // Gate: prevent "keep" when last run's checks failed
-      if (params.status === "keep" && lastRunChecks && !lastRunChecks.pass) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `❌ Cannot keep — autotrain.checks.sh failed.\n\n${lastRunChecks.output.slice(-500)}\n\nLog as 'checks_failed' instead. The benchmark metric is valid but correctness checks did not pass.`,
-            },
-          ],
-          details: {},
-        };
-      }
-
-      // Validate secondary metrics consistency (after first experiment establishes them)
-      if (state.secondaryMetrics.length > 0) {
-        const knownNames = new Set(state.secondaryMetrics.map((m) => m.name));
-        const providedNames = new Set(Object.keys(secondaryMetrics));
-
-        // Check for missing metrics
-        const missing = [...knownNames].filter((n) => !providedNames.has(n));
-        if (missing.length > 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `❌ Missing secondary metrics: ${missing.join(", ")}\n\nYou must provide all previously tracked metrics. Expected: ${[...knownNames].join(", ")}\nGot: ${[...providedNames].join(", ") || "(none)"}\n\nFix: include ${missing.map((m) => `"${m}": <value>`).join(", ")} in the metrics parameter.`,
-              },
-            ],
-            details: {},
-          };
-        }
-
-        // Check for new metrics not yet tracked
-        const newMetrics = [...providedNames].filter((n) => !knownNames.has(n));
-        if (newMetrics.length > 0 && !params.force) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `❌ New secondary metric${newMetrics.length > 1 ? "s" : ""} not previously tracked: ${newMetrics.join(", ")}\n\nExisting metrics: ${[...knownNames].join(", ")}\n\nIf this metric has proven very valuable to watch, call log_experiment again with force: true to add it. Otherwise, remove it from the metrics parameter.`,
-              },
-            ],
-            details: {},
-          };
-        }
-      }
-
-      const experiment: ExperimentResult = {
-        commit: params.commit.slice(0, 7),
-        metric: params.metric,
-        metrics: secondaryMetrics,
-        status: params.status,
-        description: params.description,
-        timestamp: Date.now(),
-        segment: state.currentSegment,
-      };
-
-      state.results.push(experiment);
-      experimentsThisSession++;
-
-      // Register any new secondary metric names
-      for (const name of Object.keys(secondaryMetrics)) {
-        if (!state.secondaryMetrics.find((m) => m.name === name)) {
-          let unit = "";
-          if (name.endsWith("_µs") || name.includes("µs")) unit = "µs";
-          else if (name.endsWith("_ms") || name.includes("ms")) unit = "ms";
-          else if (name.endsWith("_s") || name.includes("sec")) unit = "s";
-          state.secondaryMetrics.push({ name, unit });
-        }
-      }
-
-      // Baseline = first run in current segment
-      state.bestMetric = findBaselineMetric(
-        state.results,
-        state.currentSegment,
-      );
-
-      // Build response text
-      const curCount = currentResults(
-        state.results,
-        state.currentSegment,
-      ).length;
-      let text = `Logged #${state.results.length}: ${experiment.status} — ${experiment.description}`;
-
-      if (state.bestMetric !== null) {
-        text += `\nBaseline ${state.metricName}: ${formatNum(state.bestMetric, state.metricUnit)}`;
-        if (curCount > 1 && params.status === "keep" && params.metric > 0) {
-          const delta = params.metric - state.bestMetric;
-          const pct = ((delta / state.bestMetric) * 100).toFixed(1);
-          const sign = delta > 0 ? "+" : "";
-          text += ` | this: ${formatNum(params.metric, state.metricUnit)} (${sign}${pct}%)`;
-        }
-      }
-
-      // Show secondary metrics
-      if (Object.keys(secondaryMetrics).length > 0) {
-        const baselines = findBaselineSecondary(
-          state.results,
-          state.currentSegment,
-          state.secondaryMetrics,
-        );
-        const parts: string[] = [];
-        for (const [name, value] of Object.entries(secondaryMetrics)) {
-          const def = state.secondaryMetrics.find((m) => m.name === name);
-          const unit = def?.unit ?? "";
-          let part = `${name}: ${formatNum(value, unit)}`;
-          const bv = baselines[name];
-          if (bv !== undefined && state.results.length > 1 && bv !== 0) {
-            const d = value - bv;
-            const p = ((d / bv) * 100).toFixed(1);
-            const s = d > 0 ? "+" : "";
-            part += ` (${s}${p}%)`;
-          }
-          parts.push(part);
-        }
-        text += `\nSecondary: ${parts.join("  ")}`;
-      }
-
-      text += `\n(${state.results.length} experiments total)`;
-
-      // Auto-commit only on keep — discards/crashes get reverted anyway
-      if (params.status === "keep") {
-        try {
-          const resultData: Record<string, unknown> = {
-            status: params.status,
-            [state.metricName || "metric"]: params.metric,
-            ...secondaryMetrics,
-          };
-          const trailerJson = JSON.stringify(resultData);
-          const commitMsg = `${params.description}\n\nResult: ${trailerJson}`;
-
-          const gitResult = await pi.exec(
-            "bash",
-            [
-              "-c",
-              `git add -A && git diff --cached --quiet && echo "NOTHING_TO_COMMIT" || git commit -m ${JSON.stringify(commitMsg)}`,
-            ],
-            { cwd: ctx.cwd, timeout: 10000 },
-          );
-
-          const gitOutput = (gitResult.stdout + gitResult.stderr).trim();
-          if (gitOutput.includes("NOTHING_TO_COMMIT")) {
-            text += `\n📝 Git: nothing to commit (working tree clean)`;
-          } else if (gitResult.code === 0) {
-            const firstLine = gitOutput.split("\n")[0] || "";
-            text += `\n📝 Git: committed — ${firstLine}`;
-
-            // Update experiment record with the actual new commit hash
-            try {
-              const shaResult = await pi.exec(
-                "git",
-                ["rev-parse", "--short=7", "HEAD"],
-                { cwd: ctx.cwd, timeout: 5000 },
-              );
-              const newSha = (shaResult.stdout || "").trim();
-              if (newSha && newSha.length >= 7) {
-                experiment.commit = newSha;
-              }
-            } catch {
-              // Keep the original commit hash if rev-parse fails
-            }
-          } else {
-            text += `\n⚠️ Git commit failed (exit ${gitResult.code}): ${gitOutput.slice(0, 200)}`;
-          }
-        } catch (e) {
-          text += `\n⚠️ Git commit error: ${e instanceof Error ? e.message : String(e)}`;
-        }
-      } else {
-        text += `\n📝 Git: skipped commit (${params.status}) — revert with git checkout -- .`;
-      }
-
-      // Doc update reminder (every 10 experiments or on keep)
-      const totalExperiments = state.results.length;
-      const shouldRemindDoc =
-        totalExperiments % 10 === 0 || params.status === "keep";
-      if (shouldRemindDoc) {
-        text += `\n\n📝 Doc reminder: update autotrain.md "What's Been Tried" and commit it.`;
-        text += `\n   git add autotrain.md && git commit -m "doc: update session notes"`;
-      }
-
-      // Persist to autotrain.jsonl AFTER git commit (so commit hash is correct)
-      try {
-        const jsonlPath = path.join(ctx.cwd, "autotrain.jsonl");
-        fs.appendFileSync(
-          jsonlPath,
-          JSON.stringify({
-            run: state.results.length,
-            ...experiment,
-          }) + "\n",
-        );
-      } catch {
-        // Don't fail if write fails
-      }
-
-      // Clear running experiment and checks state (log_experiment consumes the run)
-      runningExperiment = null;
-      lastRunChecks = null;
-
-      updateWidget(ctx);
-
-      // Refresh fullscreen overlay if open
-      if (overlayTui) overlayTui.requestRender();
-
-      return {
-        content: [{ type: "text", text }],
-        details: { experiment, state: { ...state } } as LogDetails,
-      };
-    },
-
-    renderCall(args, theme) {
-      let text = theme.fg("toolTitle", theme.bold("log_experiment "));
-      const color =
-        args.status === "keep"
-          ? "success"
-          : args.status === "crash" || args.status === "checks_failed"
-            ? "error"
-            : "warning";
-      text += theme.fg(color, args.status);
-      text += " " + theme.fg("dim", args.description);
-      return new Text(text, 0, 0);
-    },
-
-    renderResult(result, _options, theme) {
-      const d = result.details as LogDetails | undefined;
-      if (!d) {
-        const t = result.content[0];
-        return new Text(t?.type === "text" ? t.text : "", 0, 0);
-      }
-
-      const { experiment: exp, state: s } = d;
-      const color =
-        exp.status === "keep"
-          ? "success"
-          : exp.status === "crash" || exp.status === "checks_failed"
-            ? "error"
-            : "warning";
-      const icon =
-        exp.status === "keep"
-          ? "✓"
-          : exp.status === "crash"
-            ? "✗"
-            : exp.status === "checks_failed"
-              ? "⚠"
-              : "–";
-
-      let text =
-        theme.fg(color, `${icon} `) +
-        theme.fg("accent", `#${s.results.length}`);
-
-      text += " " + theme.fg("muted", exp.description);
-
-      if (s.bestMetric !== null) {
-        text +=
-          theme.fg("dim", " │ ") +
-          theme.fg(
-            "warning",
-            theme.bold(`★ ${formatNum(s.bestMetric, s.metricUnit)}`),
-          );
-      }
-
-      // Show secondary metrics inline
-      if (Object.keys(exp.metrics).length > 0) {
-        const parts: string[] = [];
-        for (const [name, value] of Object.entries(exp.metrics)) {
-          const def = s.secondaryMetrics.find((m) => m.name === name);
-          parts.push(`${name}=${formatNum(value, def?.unit ?? "")}`);
-        }
-        text += theme.fg("dim", `  ${parts.join(" ")}`);
-      }
-
-      return new Text(text, 0, 0);
-    },
-  });
-
-  // -----------------------------------------------------------------------
-  // submit_job tool — async job submission
-  // -----------------------------------------------------------------------
-
-  pi.registerTool({
-    name: "submit_job",
-    label: "Submit Job",
-    description:
       "Submit a detached HF Job. Returns immediately with a job ID and experiment ID. Default stage is 'smoke' (10-step validation). Use stage='full' after smoke passes.",
     promptSnippet:
-      "Submit a detached HF Job (smoke or full). Returns job_id immediately.",
+      "Run an experiment via HF Jobs (smoke or full). Returns job_id immediately.",
     promptGuidelines: [
-      "submit_job submits training to HF Jobs and returns immediately. Default stage is smoke.",
+      "run_experiment submits training to HF Jobs and returns immediately. Default stage is smoke.",
       "Default stage is 'smoke'. Always run a smoke test before a full training job.",
       "For stage='full', you must provide the experiment_id from the passed smoke.",
-      "After submit_job, call check_jobs to poll for completion.",
+      "After run_experiment, call check_jobs to poll for completion.",
     ],
-    parameters: SubmitJobParams,
+    parameters: RunParams,
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const stage = params.stage ?? "smoke";
@@ -2119,7 +1494,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme) {
-      let text = theme.fg("toolTitle", theme.bold("submit_job "));
+      let text = theme.fg("toolTitle", theme.bold("run_experiment "));
       text += theme.fg("muted", args.stage ?? "smoke");
       text += " " + theme.fg("dim", args.command ?? "");
       return new Text(text, 0, 0);
@@ -2393,18 +1768,18 @@ export default function autotrainExtension(pi: ExtensionAPI) {
   });
 
   // -----------------------------------------------------------------------
-  // log_decision tool — extends log_experiment with benchmark integrity check
+  // log_experiment tool — record experiment decision with benchmark check
   // -----------------------------------------------------------------------
 
   pi.registerTool({
-    name: "log_decision",
-    label: "Log Decision",
+    name: "log_experiment",
+    label: "Log Experiment",
     description:
-      "Record an experiment decision (keep/discard/crash/smoke_failed). Like log_experiment but also checks benchmark.json integrity on keep.",
+      "Record an experiment decision (keep/discard/crash/smoke_failed). Checks benchmark.json integrity on keep.",
     promptSnippet:
-      "Log experiment decision with benchmark integrity check",
+      "Log experiment result with benchmark integrity check",
     promptGuidelines: [
-      "Use log_decision instead of log_experiment for campaigns with benchmark.json.",
+      "Use log_experiment after check_jobs shows a completed job.",
       "On 'keep', benchmark.json must not have uncommitted changes.",
       "Use 'smoke_failed' when a smoke test fails — this counts toward anti-thrash.",
     ],
@@ -2452,17 +1827,6 @@ export default function autotrainExtension(pi: ExtensionAPI) {
             // If git diff fails, proceed cautiously
           }
         }
-      }
-
-      // Gate: prevent "keep" when last run's checks failed
-      if (params.status === "keep" && lastRunChecks && !lastRunChecks.pass) {
-        return {
-          content: [{
-            type: "text",
-            text: `❌ Cannot keep — autotrain.checks.sh failed.\n\n${lastRunChecks.output.slice(-500)}\n\nLog as 'checks_failed' instead.`,
-          }],
-          details: {},
-        };
       }
 
       const secondaryMetrics = params.metrics ?? {};
@@ -2569,7 +1933,6 @@ export default function autotrainExtension(pi: ExtensionAPI) {
         );
       } catch {}
 
-      lastRunChecks = null;
       updateWidget(ctx);
       if (overlayTui) overlayTui.requestRender();
 
@@ -2580,7 +1943,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
     },
 
     renderCall(args, theme) {
-      let text = theme.fg("toolTitle", theme.bold("log_decision "));
+      let text = theme.fg("toolTitle", theme.bold("log_experiment "));
       const color = args.status === "keep" ? "success" : args.status === "crash" || args.status === "smoke_failed" ? "error" : "warning";
       text += theme.fg(color, args.status);
       text += " " + theme.fg("dim", args.description);
@@ -2594,10 +1957,10 @@ export default function autotrainExtension(pi: ExtensionAPI) {
   });
 
   // -----------------------------------------------------------------------
-  // Ctrl+Y — toggle dashboard expand/collapse
+  // Ctrl+X — toggle dashboard expand/collapse
   // -----------------------------------------------------------------------
 
-  pi.registerShortcut("ctrl+y", {
+  pi.registerShortcut("ctrl+x", {
     description: "Toggle autotrain dashboard",
     handler: async (ctx) => {
       if (state.results.length === 0) {
@@ -2620,10 +1983,10 @@ export default function autotrainExtension(pi: ExtensionAPI) {
   });
 
   // -----------------------------------------------------------------------
-  // Ctrl+Shift+Y — fullscreen scrollable dashboard overlay
+  // Ctrl+Shift+X — fullscreen scrollable dashboard overlay
   // -----------------------------------------------------------------------
 
-  pi.registerShortcut("ctrl+shift+y", {
+  pi.registerShortcut("ctrl+shift+x", {
     description: "Fullscreen autotrain dashboard",
     handler: async (ctx) => {
       if (state.results.length === 0) {
@@ -2640,7 +2003,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
           // Start spinner interval for elapsed time animation
           spinnerInterval = setInterval(() => {
             spinnerFrame = (spinnerFrame + 1) % SPINNER.length;
-            if (runningExperiment) tui.requestRender();
+            if (activeJobs.size > 0) tui.requestRender();
           }, 80);
 
           function formatElapsed(ms: number): string {
@@ -2655,22 +2018,6 @@ export default function autotrainExtension(pi: ExtensionAPI) {
               const termH = process.stdout.rows || 40;
               // Content gets the full width — no box borders
               const content = renderDashboardLines(state, width, theme, 0);
-
-              // Add running experiment as next row in the list (legacy sync mode)
-              if (runningExperiment) {
-                const elapsed = formatElapsed(
-                  Date.now() - runningExperiment.startedAt,
-                );
-                const frame = SPINNER[spinnerFrame % SPINNER.length];
-                const nextIdx = state.results.length + 1;
-                content.push(
-                  truncateToWidth(
-                    `  ${theme.fg("dim", String(nextIdx).padEnd(3))}` +
-                      theme.fg("warning", `${frame} running… ${elapsed}`),
-                    width,
-                  ),
-                );
-              }
 
               // Add active async jobs
               for (const [, job] of activeJobs) {
@@ -2748,7 +2095,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
               const termH = process.stdout.rows || 40;
               const viewportRows = Math.max(4, termH - 4);
               const totalRows =
-                state.results.length + (runningExperiment ? 1 : 0) + 15; // rough estimate
+                state.results.length + activeJobs.size + 15; // rough estimate
               const maxScroll = Math.max(0, totalRows - viewportRows);
 
               if (matchesKey(data, "escape") || data === "q") {

@@ -45,7 +45,7 @@ describe("init_campaign — benchmark support", () => {
   });
 });
 
-describe("log_decision — benchmark integrity check", () => {
+describe("log_experiment — benchmark integrity check", () => {
   it("git diff HEAD -- benchmark.json detects changes", () => {
     // If git diff returns non-empty output, benchmark has changed
     const diffOutput = "-  \"eval_n\": 200\n+  \"eval_n\": 50";

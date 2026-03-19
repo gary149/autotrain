@@ -4,8 +4,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
-describe("submit_job — smoke (unit logic)", () => {
-  it("hashCommand produces consistent hashes for submit_job", () => {
+describe("run_experiment — smoke (unit logic)", () => {
+  it("hashCommand produces consistent hashes for run_experiment", () => {
     const hash = hashCommand("./autotrain.sh");
     expect(hash).toHaveLength(64);
     expect(hashCommand("./autotrain.sh")).toBe(hash);
@@ -18,7 +18,7 @@ describe("submit_job — smoke (unit logic)", () => {
   });
 });
 
-describe("submit_job — full stage gate (unit logic)", () => {
+describe("run_experiment — full stage gate (unit logic)", () => {
   it("script hash comparison catches edits between smoke and full", () => {
     const smokeHash = hashCommand("./autotrain.sh v1");
     const fullHash = hashCommand("./autotrain.sh v2");
@@ -31,7 +31,7 @@ describe("submit_job — full stage gate (unit logic)", () => {
   });
 });
 
-describe("submit_job — 24-char hex job ID parsing", () => {
+describe("run_experiment — 24-char hex job ID parsing", () => {
   it("matches 24-char hex from typical hf jobs output", () => {
     const stdout = "abc123def456789012345678\nView at: https://huggingface.co/jobs/user/abc123def456789012345678";
     const match = stdout.match(/[0-9a-f]{24}/);
@@ -46,9 +46,9 @@ describe("submit_job — 24-char hex job ID parsing", () => {
   });
 });
 
-describe("submit_job — benchmark.json dirty check (unit logic)", () => {
+describe("run_experiment — benchmark.json dirty check (unit logic)", () => {
   it("benchmark.json dirty check blocks submission", () => {
-    // Simulate what submit_job does: check if git diff output is non-empty
+    // Simulate what run_experiment does: check if git diff output is non-empty
     const diffOutput = "diff --git a/benchmark.json b/benchmark.json\n-old\n+new";
     const isDirty = diffOutput.trim().length > 0;
     expect(isDirty).toBe(true);
