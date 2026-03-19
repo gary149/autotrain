@@ -5,9 +5,12 @@
  * Domain-specific behavior comes from skills (what command to run, what to optimize).
  *
  * Provides:
- * - `run_experiment` tool — runs any command, times it, captures output, detects pass/fail
- * - `log_experiment` tool — records results with session-persisted state
- * - Status widget showing experiment count + best metric
+ * - `submit_job` tool — submits detached HF Job, returns immediately with job ID
+ * - `check_jobs` tool — polls active jobs for status and metrics
+ * - `cancel_job` tool — cancels a running job with minimum runtime guard
+ * - `log_decision` tool — records keep/discard with benchmark integrity check
+ * - `run_experiment` tool — synchronous local runner (utility only, NOT for training)
+ * - Status widget showing experiment count + best metric + active jobs
  * - Ctrl+Y toggle to expand/collapse full dashboard inline above the editor
  * - Injects autotrain.md into context on every turn via before_agent_start
  */
@@ -344,6 +347,21 @@ export function hashCommand(cmd: string): string {
   return createHash("sha256").update(cmd).digest("hex");
 }
 
+export function hashWorkspace(cwd: string, command: string): string {
+  const hash = createHash("sha256");
+  hash.update(command);
+  const files = ["autotrain.sh", "train.py", "config.json", "config.yaml"];
+  for (const f of files) {
+    const p = path.join(cwd, f);
+    try {
+      if (fs.existsSync(p)) {
+        hash.update(f + ":" + fs.readFileSync(p, "utf-8"));
+      }
+    } catch {}
+  }
+  return hash.digest("hex");
+}
+
 // ---------------------------------------------------------------------------
 // Reconstruction Helpers (pure functions)
 // ---------------------------------------------------------------------------
@@ -384,19 +402,16 @@ export function rebuildSmokeRegistry(
 ): Map<number, SmokeRegistryEntry> {
   const registry = new Map<number, SmokeRegistryEntry>();
 
-  // Initialize from submitted smoke entries
+  // Initialize from submitted smoke entries — LATEST wins
   for (const s of submitted) {
     if (s.stage !== "smoke") continue;
-    const existing = registry.get(s.experiment_id);
-    if (!existing) {
-      registry.set(s.experiment_id, {
-        passed: false,
-        script_hash: s.script_hash ?? "",
-        job_id: s.job_id,
-        failures: 0,
-        timestamp: s.timestamp ?? 0,
-      });
-    }
+    registry.set(s.experiment_id, {
+      passed: false,
+      script_hash: s.script_hash ?? "",
+      job_id: s.job_id,
+      failures: registry.get(s.experiment_id)?.failures ?? 0,
+      timestamp: s.timestamp ?? 0,
+    });
   }
 
   // Update from completed smoke entries
@@ -409,6 +424,7 @@ export function rebuildSmokeRegistry(
       entry.timestamp = c.timestamp ?? entry.timestamp;
     } else {
       entry.failures++;
+      entry.passed = false;
     }
   }
 
@@ -425,7 +441,7 @@ export function rebuildSmokeRegistry(
  */
 export function mapHfStatus(
   hfStatus: string,
-): "completed" | "error" | "canceled" | "timeout" | "running" {
+): "completed" | "error" | "canceled" | "running" {
   switch (hfStatus) {
     case "COMPLETED":
       return "completed";
@@ -433,8 +449,8 @@ export function mapHfStatus(
       return "error";
     case "CANCELED":
       return "canceled";
-    case "TIMEOUT":
-      return "timeout";
+    case "DELETED":
+      return "canceled";
     default:
       return "running";
   }
@@ -928,7 +944,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
       try {
         const inspectResult = await pi.exec(
           "hf",
-          ["jobs", "inspect", jobId, "--format", "json"],
+          ["jobs", "inspect", jobId],
           { cwd: ctx.cwd, timeout: 15000 },
         );
         const inspectData = JSON.parse(inspectResult.stdout);
@@ -975,6 +991,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
                 regEntry.passed = true;
               } else {
                 regEntry.failures++;
+                regEntry.passed = false;
               }
             }
           }
@@ -1204,18 +1221,17 @@ export default function autotrainExtension(pi: ExtensionAPI) {
     let extra =
       "\n\n## Autotrain Mode (ACTIVE)" +
       "\nYou are in autotrain mode. Optimize the primary metric through an autonomous experiment loop." +
-      "\nUse init_experiment, run_experiment, and log_experiment tools. NEVER STOP until interrupted." +
+      "\nUse init_experiment, submit_job, check_jobs, and log_decision tools. Use submit_job for ALL training — it submits to HF Jobs and returns immediately. Poll with check_jobs. NEVER STOP until interrupted." +
       `\nExperiment rules: ${mdPath} — read this file at the start of every session and after compaction.` +
       "\nWrite promising but deferred optimizations as bullet points to autotrain.ideas.md — don't let good ideas get lost." +
       `\n${BENCHMARK_GUARDRAIL}` +
-      "\nIf the user sends a follow-on message while an experiment is running, finish the current run_experiment + log_experiment cycle first, then address their message in the next iteration.";
+      "\nDo NOT use run_experiment for training. It is only for quick local utility commands (data prep, evaluation scripts). All training must go through submit_job → check_jobs → log_decision.";
 
     if (hasChecks) {
       extra +=
         "\n\n## Backpressure Checks (ACTIVE)" +
-        `\n${checksPath} exists and runs automatically after every passing benchmark in run_experiment.` +
-        "\nIf the benchmark passes but checks fail, run_experiment will report it clearly." +
-        "\nUse status 'checks_failed' in log_experiment when this happens — it behaves like a crash (no commit, revert changes)." +
+        `\n${checksPath} exists — run it manually after check_jobs reports a completed job.` +
+        "\nIf checks fail, use status 'checks_failed' in log_decision — it behaves like a crash (no commit, revert changes)." +
         "\nYou cannot use status 'keep' when checks have failed." +
         "\nThe checks execution time does NOT affect the primary metric.";
     }
@@ -1262,11 +1278,11 @@ export default function autotrainExtension(pi: ExtensionAPI) {
     name: "init_experiment",
     label: "Init Experiment",
     description:
-      "Initialize the experiment session. Call once before the first run_experiment to set the name, primary metric, unit, and direction. Writes the config header to autotrain.jsonl.",
+      "Initialize the experiment session. Call once before the first submit_job to set the name, primary metric, unit, and direction. Writes the config header to autotrain.jsonl.",
     promptSnippet:
       "Initialize experiment session (name, metric, unit, direction). Call once before first run.",
     promptGuidelines: [
-      "Call init_experiment exactly once at the start of an autotrain session, before the first run_experiment.",
+      "Call init_experiment exactly once at the start of an autotrain session, before the first submit_job.",
       "If autotrain.jsonl already exists with a config, do NOT call init_experiment again.",
       "If the optimization target changes (different benchmark, metric, or workload), call init_experiment again to insert a new config header and reset the baseline.",
     ],
@@ -1359,7 +1375,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
         content: [
           {
             type: "text",
-            text: `✅ Experiment initialized: "${state.name}"${reinitNote}\nMetric: ${state.metricName} (${state.metricUnit || "unitless"}, ${state.bestDirection} is better)\nConfig written to autotrain.jsonl. Now run the baseline with run_experiment.${benchmarkNote}`,
+            text: `✅ Experiment initialized: "${state.name}"${reinitNote}\nMetric: ${state.metricName} (${state.metricUnit || "unitless"}, ${state.bestDirection} is better)\nConfig written to autotrain.jsonl. Now submit the baseline smoke with submit_job.${benchmarkNote}`,
           },
         ],
         details: { state: { ...state } },
@@ -1386,12 +1402,13 @@ export default function autotrainExtension(pi: ExtensionAPI) {
     name: "run_experiment",
     label: "Run Experiment",
     description:
-      "Run a shell command as an experiment. Times wall-clock duration, captures output, detects pass/fail via exit code. Use for any autotrain experiment.",
+      "Synchronous local command runner. NOT for training — use submit_job instead. Only for quick local utility commands like data prep scripts or evaluation.",
     promptSnippet:
-      "Run a timed experiment command (captures duration, output, exit code)",
+      "Run a local utility command (NOT for training — use submit_job)",
     promptGuidelines: [
-      "Use run_experiment instead of bash when running experiment commands — it handles timing and output capture automatically.",
-      "After run_experiment, always call log_experiment to record the result.",
+      "Do NOT use run_experiment for training. Use submit_job for all HF Jobs training.",
+      "run_experiment is only for quick local utility commands like data prep, evaluation scripts, or file operations.",
+      "After run_experiment, call log_experiment to record the result. For HF Jobs training, use log_decision instead.",
     ],
     parameters: RunParams,
 
@@ -1613,12 +1630,11 @@ export default function autotrainExtension(pi: ExtensionAPI) {
     name: "log_experiment",
     label: "Log Experiment",
     description:
-      "Record an experiment result. Tracks metrics, updates the status widget and dashboard. Call after every run_experiment.",
+      "Record a local utility run result. For HF Jobs training results, use log_decision instead.",
     promptSnippet:
-      "Log experiment result (commit, metric, status, description)",
+      "Log local utility run result (use log_decision for HF Jobs training)",
     promptGuidelines: [
-      "Always call log_experiment after run_experiment to record the result.",
-      "After run_experiment, always call log_experiment to record the result.",
+      "Use log_experiment only after run_experiment (local utility runs). For HF Jobs training, use log_decision instead.",
       "log_experiment automatically runs git add -A && git commit with the description and a Result trailer. Do NOT commit manually before calling log_experiment.",
       "Use status 'keep' if the PRIMARY metric improved. 'discard' if worse or unchanged. 'crash' if it failed. Secondary metrics are for monitoring — they almost never affect keep/discard. Only discard a primary improvement if a secondary metric degraded catastrophically, and explain why in the description.",
       "If you discover complex but promising optimizations you won't pursue immediately, append them as bullet points to autotrain.ideas.md. Don't let good ideas get lost.",
@@ -1940,7 +1956,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
     promptSnippet:
       "Submit a detached HF Job (smoke or full). Returns job_id immediately.",
     promptGuidelines: [
-      "Use submit_job instead of run_experiment for HF Jobs campaigns — it returns immediately.",
+      "submit_job submits training to HF Jobs and returns immediately. Default stage is smoke.",
       "Default stage is 'smoke'. Always run a smoke test before a full training job.",
       "For stage='full', you must provide the experiment_id from the passed smoke.",
       "After submit_job, call check_jobs to poll for completion.",
@@ -1951,7 +1967,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
       const stage = params.stage ?? "smoke";
       const timeout = (params.timeout_seconds ?? 600) * 1000;
       const command = params.command;
-      const scriptHash = hashCommand(command);
+      const scriptHash = hashWorkspace(ctx.cwd, command);
       const jsonlPath = path.join(ctx.cwd, "autotrain.jsonl");
 
       // For full stage: validate smoke gate
@@ -1990,6 +2006,24 @@ export default function autotrainExtension(pi: ExtensionAPI) {
             details: {},
           };
         }
+      }
+
+      // Benchmark integrity check — refuse to submit if benchmark.json is dirty
+      const benchmarkPath = path.join(ctx.cwd, "benchmark.json");
+      if (fs.existsSync(benchmarkPath)) {
+        try {
+          const diffResult = await pi.exec(
+            "git", ["diff", "HEAD", "--", "benchmark.json"],
+            { cwd: ctx.cwd, timeout: 5000 },
+          );
+          const diffOutput = (diffResult.stdout || "").trim();
+          if (diffOutput) {
+            return {
+              content: [{ type: "text", text: "❌ Cannot submit — benchmark.json has uncommitted changes.\n\nRevert with: git checkout -- benchmark.json" }],
+              details: {},
+            };
+          }
+        } catch {}
       }
 
       // Execute the command
@@ -2046,6 +2080,8 @@ export default function autotrainExtension(pi: ExtensionAPI) {
           const reg = smokeRegistry.get(experimentId!)!;
           reg.job_id = jobId;
           reg.script_hash = scriptHash;
+          reg.passed = false;
+          reg.failures = 0;
         }
       }
 
@@ -2134,14 +2170,14 @@ export default function autotrainExtension(pi: ExtensionAPI) {
         const now = Date.now();
         const elapsedSeconds = Math.round((now - job.started_at) / 1000);
 
-        let status: "running" | "completed" | "error" | "canceled" | "timeout" = "running";
+        let status: "running" | "completed" | "error" | "canceled" = "running";
         let metrics: Record<string, number> | null = null;
         let tailOutput = "";
 
         try {
           const inspectResult = await pi.exec(
             "hf",
-            ["jobs", "inspect", job.job_id, "--format", "json"],
+            ["jobs", "inspect", job.job_id],
             { cwd: ctx.cwd, timeout: 15000, signal },
           );
           const inspectData = JSON.parse(inspectResult.stdout);
@@ -2192,6 +2228,7 @@ export default function autotrainExtension(pi: ExtensionAPI) {
                 reg.passed = true;
               } else {
                 reg.failures++;
+                reg.passed = false;
               }
             }
           }
@@ -2309,6 +2346,30 @@ export default function autotrainExtension(pi: ExtensionAPI) {
           content: [{ type: "text", text: `❌ Failed to cancel job: ${e instanceof Error ? e.message : String(e)}` }],
           details: {},
         };
+      }
+
+      // Write job_completed for the canceled job
+      const jsonlPath = path.join(ctx.cwd, "autotrain.jsonl");
+      try {
+        const completedEntry = JSON.stringify({
+          type: "job_completed",
+          job_id: params.job_id,
+          experiment_id: job.experiment_id,
+          stage: job.stage,
+          status: "canceled",
+          metrics: null,
+          timestamp: Date.now(),
+        });
+        fs.appendFileSync(jsonlPath, completedEntry + "\n");
+      } catch {}
+
+      // Update smoke registry — canceled smoke counts as failure
+      if (job.stage === "smoke") {
+        const reg = smokeRegistry.get(job.experiment_id);
+        if (reg) {
+          reg.failures++;
+          reg.passed = false;
+        }
       }
 
       activeJobs.delete(params.job_id);

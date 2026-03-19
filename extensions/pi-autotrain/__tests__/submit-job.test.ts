@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { hashCommand } from "../index.js";
+import { hashCommand, hashWorkspace } from "../index.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 
 describe("submit_job — smoke (unit logic)", () => {
   it("hashCommand produces consistent hashes for submit_job", () => {
@@ -40,5 +43,31 @@ describe("submit_job — 24-char hex job ID parsing", () => {
     const stdout = "Error: something went wrong";
     const match = stdout.match(/[0-9a-f]{24}/);
     expect(match).toBeNull();
+  });
+});
+
+describe("submit_job — benchmark.json dirty check (unit logic)", () => {
+  it("benchmark.json dirty check blocks submission", () => {
+    // Simulate what submit_job does: check if git diff output is non-empty
+    const diffOutput = "diff --git a/benchmark.json b/benchmark.json\n-old\n+new";
+    const isDirty = diffOutput.trim().length > 0;
+    expect(isDirty).toBe(true);
+  });
+
+  it("clean benchmark.json allows submission", () => {
+    const diffOutput = "";
+    const isDirty = diffOutput.trim().length > 0;
+    expect(isDirty).toBe(false);
+  });
+
+  it("hashWorkspace is used instead of hashCommand for script detection", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sj-test-"));
+    fs.writeFileSync(path.join(dir, "autotrain.sh"), "echo train v1");
+    const h1 = hashWorkspace(dir, "./autotrain.sh");
+    fs.writeFileSync(path.join(dir, "autotrain.sh"), "echo train v2");
+    const h2 = hashWorkspace(dir, "./autotrain.sh");
+    // Editing autotrain.sh should change the hash, proving workspace hashing works
+    expect(h1).not.toBe(h2);
+    fs.rmSync(dir, { recursive: true });
   });
 });

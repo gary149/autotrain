@@ -20,7 +20,7 @@ describe("orphan scan logic", () => {
     expect(mapHfStatus("COMPLETED")).toBe("completed");
     expect(mapHfStatus("ERROR")).toBe("error");
     expect(mapHfStatus("CANCELED")).toBe("canceled");
-    expect(mapHfStatus("TIMEOUT")).toBe("timeout");
+    expect(mapHfStatus("DELETED")).toBe("canceled");
   });
 
   it("still-running jobs remain in activeJobs", () => {

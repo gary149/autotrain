@@ -11,8 +11,8 @@ describe("mapHfStatus", () => {
   it("CANCELED → canceled", () => {
     expect(mapHfStatus("CANCELED")).toBe("canceled");
   });
-  it("TIMEOUT → timeout", () => {
-    expect(mapHfStatus("TIMEOUT")).toBe("timeout");
+  it("DELETED → canceled", () => {
+    expect(mapHfStatus("DELETED")).toBe("canceled");
   });
   it("RUNNING → running", () => {
     expect(mapHfStatus("RUNNING")).toBe("running");

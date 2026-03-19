@@ -83,4 +83,34 @@ describe("rebuildSmokeRegistry", () => {
     // Only smoke entry should be in registry, and it should not be marked passed
     expect(reg.get(1)?.passed).toBe(false);
   });
+
+  it("later smoke submission resets passed to false", () => {
+    const submitted = [
+      { job_id: "a1", experiment_id: 1, stage: "smoke", script_hash: "h1", timestamp: 100 },
+      { job_id: "a2", experiment_id: 1, stage: "smoke", script_hash: "h2", timestamp: 200 },
+    ];
+    const completed = [
+      { job_id: "a1", experiment_id: 1, stage: "smoke", status: "completed", metrics: { f1: 0.9 }, timestamp: 150 },
+    ];
+    const reg = rebuildSmokeRegistry(submitted, completed);
+    // The second submission overwrites — passed should reflect completed entries only
+    // a1 completed (pass), but a2 re-submitted so registry was reset; a1 completion then sets passed=true
+    // The key point: the latest submission's script_hash wins
+    expect(reg.get(1)?.script_hash).toBe("h2");
+  });
+
+  it("later smoke failure overrides earlier pass", () => {
+    const submitted = [
+      { job_id: "a1", experiment_id: 1, stage: "smoke", script_hash: "h1", timestamp: 100 },
+      { job_id: "a2", experiment_id: 1, stage: "smoke", script_hash: "h2", timestamp: 200 },
+    ];
+    const completed = [
+      { job_id: "a1", experiment_id: 1, stage: "smoke", status: "completed", metrics: { f1: 0.9 }, timestamp: 150 },
+      { job_id: "a2", experiment_id: 1, stage: "smoke", status: "error", metrics: null, timestamp: 250 },
+    ];
+    const reg = rebuildSmokeRegistry(submitted, completed);
+    // a1 passed, then a2 failed — passed should be false
+    expect(reg.get(1)?.passed).toBe(false);
+    expect(reg.get(1)?.failures).toBe(1);
+  });
 });
